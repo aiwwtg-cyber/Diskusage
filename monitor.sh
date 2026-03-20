@@ -40,7 +40,7 @@ do_start() {
     fi
     mkdir -p "$DISKUSAGE_HOME/logs" "$DISKUSAGE_HOME/config"
     echo "starting monitor..."
-    _monitor_loop &
+    _monitor_loop >/dev/null 2>&1 &
     local pid=$!
     echo "$pid" > "$PID_FILE"
     echo "monitor started (pid: $pid)"
@@ -54,7 +54,7 @@ do_stop() {
     local pid
     pid=$(cat "$PID_FILE")
     echo "stopping monitor (pid: $pid)..."
-    kill "$pid" 2>/dev/null || true
+    kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
     rm -f "$PID_FILE" "$STATUS_FILE"
     echo "monitor stopped"
 }
@@ -151,7 +151,10 @@ _monitor_loop() {
 }
 
 _on_exit() {
-    rm -f "$PID_FILE" "$STATUS_FILE"
+    local own_pid=$$
+    if [[ -f "$PID_FILE" ]] && [[ "$(cat "$PID_FILE" 2>/dev/null)" == "$own_pid" ]]; then
+        rm -f "$PID_FILE" "$STATUS_FILE"
+    fi
 }
 
 case "${1:-}" in
