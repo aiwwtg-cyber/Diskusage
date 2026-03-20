@@ -1,0 +1,35 @@
+# Diskusage Configuration
+# 이 파일을 ~/.diskusage/config/config.conf 로 복사하여 사용
+
+# 감시 주기 (초)
+MONITOR_INTERVAL=5
+# 경고 수준 초과 시 폴링 간격 (초)
+MONITOR_INTERVAL_HIGH=15
+
+# I/O 임계값 (KB/s 기준, /proc/diskstats 델타에서 계산)
+MONITOR_IO_WARN_KB=61440
+MONITOR_IO_ALERT_KB=76800
+MONITOR_IO_DANGER_KB=92160
+
+# Windows 워치독 임계값 (WSL VHD I/O 기준, % of baseline)
+WARN_THRESHOLD=60
+ALERT_THRESHOLD=75
+DANGER_THRESHOLD=90
+CRITICAL_THRESHOLD=95
+
+# I/O 기준값 (MB/s, 사용자 환경에 맞게 조정)
+IO_BASELINE_MBPS=100
+
+# 지속 시간 (초)
+WARN_DURATION=30
+ALERT_DURATION=30
+DANGER_DURATION=60
+CRITICAL_DURATION=120
+
+# wsl -e 타임아웃 (초)
+WSL_EXEC_TIMEOUT=10
+
+# 로그 보관 기간 (일)
+LOG_RETENTION_DAYS=7
+# 일별 최대 로그 크기 (MB)
+MAX_LOG_SIZE_MB=50
