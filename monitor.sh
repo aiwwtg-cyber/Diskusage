@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DISKUSAGE_HOME="${DISKUSAGE_HOME:-$HOME/.diskusage}"
+PID_FILE="$DISKUSAGE_HOME/monitor.pid"
+STATUS_FILE="$DISKUSAGE_HOME/status"
+
+# source libraries
+source "$SCRIPT_DIR/lib/monitor/config.sh"
+source "$SCRIPT_DIR/lib/monitor/diskstats.sh"
+source "$SCRIPT_DIR/lib/monitor/logger.sh"
+source "$SCRIPT_DIR/lib/monitor/cleanup.sh"
+
+load_config
+
+set_status() {
+    echo "$1" > "$STATUS_FILE"
+}
+
+is_running() {
+    if [[ -f "$PID_FILE" ]]; then
+        local pid
+        pid=$(cat "$PID_FILE")
+        if kill -0 "$pid" 2>/dev/null; then
+            local cmd
+            cmd=$(ps -p "$pid" -o comm= 2>/dev/null || true)
+            if [[ "$cmd" == "bash" || "$cmd" == "monitor.sh" ]]; then
+                return 0
+            fi
+        fi
+        rm -f "$PID_FILE"
+    fi
+    return 1
+}
+
+do_start() {
+    if is_running; then
+        echo "monitor is already running (pid: $(cat "$PID_FILE"))"
+        exit 1
+    fi
+    mkdir -p "$DISKUSAGE_HOME/logs" "$DISKUSAGE_HOME/config"
+    echo "starting monitor..."
+    _monitor_loop &
+    local pid=$!
+    echo "$pid" > "$PID_FILE"
+    echo "monitor started (pid: $pid)"
+}
+
+do_stop() {
+    if ! is_running; then
+        echo "monitor is not running"
+        return 0
+    fi
+    local pid
+    pid=$(cat "$PID_FILE")
+    echo "stopping monitor (pid: $pid)..."
+    kill "$pid" 2>/dev/null || true
+    rm -f "$PID_FILE" "$STATUS_FILE"
+    echo "monitor stopped"
+}
+
+do_status() {
+    if is_running; then
+        echo "monitor is running (pid: $(cat "$PID_FILE"))"
+    else
+        echo "monitor is stopped"
+    fi
+}
+
+do_report() {
+    local logfile="$DISKUSAGE_HOME/logs/$(date +%Y-%m-%d).log"
+    if [[ ! -f "$logfile" ]]; then
+        echo "no log for today"
+        return 0
+    fi
+    echo "=== Diskusage Report $(date +%Y-%m-%d) ==="
+    echo ""
+    echo "--- Actions taken ---"
+    grep "ACTION:" "$logfile" 2>/dev/null || echo "(none)"
+    echo ""
+    echo "--- External pressure events ---"
+    grep "EXTERNAL:" "$logfile" 2>/dev/null || echo "(none)"
+    echo ""
+    echo "--- Peak I/O (top 5 entries) ---"
+    grep "VHD_IO:" "$logfile" 2>/dev/null | sort -t: -k2 -rn | head -5 || echo "(none)"
+    echo ""
+    echo "--- Log size ---"
+    du -h "$logfile"
+}
+
+_monitor_loop() {
+    trap '_on_exit' EXIT TERM INT
+    set_status "idle"
+    rotate_logs
+    local last_rotation
+    last_rotation=$(date +%s)
+    local prev_rd=0 prev_wr=0
+    local first_read=true
+
+    while true; do
+        local stats
+        stats=$(read_diskstats)
+        local curr_rd curr_wr
+        read -r curr_rd curr_wr <<< "$stats"
+
+        if $first_read; then
+            prev_rd=$curr_rd
+            prev_wr=$curr_wr
+            first_read=false
+            sleep "$MONITOR_INTERVAL"
+            continue
+        fi
+
+        local io_result
+        io_result=$(calc_io_kbps "$prev_rd" "$prev_wr" "$curr_rd" "$curr_wr" "$MONITOR_INTERVAL")
+        local rd_kbps wr_kbps total_kbps
+        read -r rd_kbps wr_kbps total_kbps <<< "$io_result"
+
+        local level
+        level=$(get_io_level "$total_kbps")
+
+        local mem_info
+        mem_info=$(free -m | awk '/Mem:/{printf "%dM/%dM", $3, $2} /Swap:/{printf " SWAP:%dM/%dM", $3, $2}')
+
+        log_entry "VHD_IO:${total_kbps}KB/s MEM:${mem_info} LEVEL:${level}"
+
+        if [[ "$level" != "normal" ]]; then
+            set_status "cleaning"
+            run_cleanup "$level"
+            set_status "monitoring"
+        else
+            set_status "idle"
+        fi
+
+        prev_rd=$curr_rd
+        prev_wr=$curr_wr
+
+        local now
+        now=$(date +%s)
+        if (( now - last_rotation > 3600 )); then
+            rotate_logs
+            last_rotation=$now
+        fi
+
+        local interval=$MONITOR_INTERVAL
+        if [[ "$level" == "alert" || "$level" == "danger" ]]; then
+            interval=$MONITOR_INTERVAL_HIGH
+        fi
+        sleep "$interval"
+    done
+}
+
+_on_exit() {
+    rm -f "$PID_FILE" "$STATUS_FILE"
+}
+
+case "${1:-}" in
+    start)  do_start ;;
+    stop)   do_stop ;;
+    status) do_status ;;
+    report) do_report ;;
+    *)      echo "Usage: $0 {start|stop|status|report}" ; exit 1 ;;
+esac
