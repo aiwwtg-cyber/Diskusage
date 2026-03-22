@@ -10,8 +10,10 @@ source "$SCRIPT_DIR/lib/monitor/config.sh"
 source "$SCRIPT_DIR/lib/monitor/diskstats.sh"
 source "$SCRIPT_DIR/lib/monitor/logger.sh"
 source "$SCRIPT_DIR/lib/monitor/cleanup.sh"
+source "$SCRIPT_DIR/lib/monitor/telegram.sh"
 
 load_config
+load_telegram_config
 
 set_status() {
     echo "$1" > "$STATUS_FILE"
@@ -44,6 +46,7 @@ do_start() {
     local pid=$!
     echo "$pid" > "$PID_FILE"
     echo "monitor started (pid: $pid)"
+    notify_monitor_started
 }
 
 do_stop() {
@@ -96,6 +99,8 @@ _monitor_loop() {
     last_rotation=$(date +%s)
     local prev_rd=0 prev_wr=0
     local first_read=true
+    local prev_level="normal"
+    local last_tg_notify=0
 
     while true; do
         local stats
@@ -128,7 +133,21 @@ _monitor_loop() {
             set_status "cleaning"
             run_cleanup "$level"
             set_status "monitoring"
+            # 텔레그램 알림 (레벨 변화 시 또는 5분마다)
+            local now_tg
+            now_tg=$(date +%s)
+            if [[ "$level" != "$prev_level" ]] || (( now_tg - last_tg_notify > 300 )); then
+                notify_level_change "$level" "$total_kbps" "$mem_info"
+                last_tg_notify=$now_tg
+            fi
+            prev_level="$level"
         else
+            if [[ "$prev_level" != "normal" ]]; then
+                send_telegram "✅ <b>정상 복귀</b>
+I/O: ${total_kbps} KB/s
+$(date '+%Y-%m-%d %H:%M:%S')"
+            fi
+            prev_level="normal"
             set_status "idle"
         fi
 
@@ -151,6 +170,7 @@ _monitor_loop() {
 }
 
 _on_exit() {
+    notify_monitor_stopped
     local own_pid=$$
     if [[ -f "$PID_FILE" ]] && [[ "$(cat "$PID_FILE" 2>/dev/null)" == "$own_pid" ]]; then
         rm -f "$PID_FILE" "$STATUS_FILE"

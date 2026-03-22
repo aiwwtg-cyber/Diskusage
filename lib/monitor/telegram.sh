@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# telegram.sh — 텔레그램 알림
+
+_TELEGRAM_BOT_TOKEN=""
+_TELEGRAM_CHAT_ID=""
+
+load_telegram_config() {
+    local chatbot_env="$HOME/project/Chatbot/.env"
+    if [[ -f "$chatbot_env" ]]; then
+        _TELEGRAM_BOT_TOKEN=$(grep TELEGRAM_BOT_TOKEN "$chatbot_env" | cut -d= -f2 | tr -d '"' | tr -d "'" | xargs)
+    fi
+
+    local tg_conf="$DISKUSAGE_HOME/config/telegram.conf"
+    if [[ -f "$tg_conf" ]]; then
+        _TELEGRAM_CHAT_ID=$(grep CHAT_ID "$tg_conf" | cut -d= -f2 | tr -d '[:space:]')
+    fi
+}
+
+send_telegram() {
+    local msg="$1"
+    [[ -z "$_TELEGRAM_BOT_TOKEN" || -z "$_TELEGRAM_CHAT_ID" ]] && return 0
+    curl -s -X POST "https://api.telegram.org/bot${_TELEGRAM_BOT_TOKEN}/sendMessage" \
+        -d chat_id="$_TELEGRAM_CHAT_ID" \
+        -d text="$msg" \
+        -d parse_mode="HTML" \
+        --max-time 5 >/dev/null 2>&1 &
+}
+
+notify_monitor_started() {
+    send_telegram "✅ <b>Diskusage Monitor Started</b>
+$(date '+%Y-%m-%d %H:%M:%S')
+PID: $$"
+}
+
+notify_monitor_stopped() {
+    send_telegram "🛑 <b>Diskusage Monitor Stopped</b>
+$(date '+%Y-%m-%d %H:%M:%S')"
+}
+
+notify_level_change() {
+    local level="$1"
+    local total_kbps="$2"
+    local mem_info="$3"
+
+    local emoji icon
+    case "$level" in
+        warn)   emoji="⚠️"; icon="Warning" ;;
+        alert)  emoji="🟠"; icon="Alert" ;;
+        danger) emoji="🔴"; icon="DANGER" ;;
+        *)      return 0 ;;
+    esac
+
+    send_telegram "${emoji} <b>Diskusage ${icon}</b>
+Level: ${level}
+I/O: ${total_kbps} KB/s
+${mem_info}
+$(date '+%Y-%m-%d %H:%M:%S')"
+}
