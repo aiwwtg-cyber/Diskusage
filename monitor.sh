@@ -65,8 +65,10 @@ do_stop() {
 do_status() {
     if is_running; then
         echo "monitor is running (pid: $(cat "$PID_FILE"))"
+        return 0
     else
         echo "monitor is stopped"
+        return 1
     fi
 }
 
@@ -101,6 +103,7 @@ _monitor_loop() {
     local first_read=true
     local prev_level="normal"
     local last_tg_notify=0
+    local swap_warned=false
 
     while true; do
         local stats
@@ -127,7 +130,16 @@ _monitor_loop() {
         local mem_info
         mem_info=$(free -m | awk '/Mem:/{printf "%dM/%dM", $3, $2} /Swap:/{printf " SWAP:%dM/%dM", $3, $2}')
 
-        log_entry "VHD_IO:${total_kbps}KB/s MEM:${mem_info} LEVEL:${level}"
+        # 메모리 Top 프로세스 추적 (warn 이상 또는 메모리 85%+)
+        local mem_used mem_total mem_pct top_procs=""
+        read -r mem_used mem_total <<< "$(free -m | awk '/Mem:/{print $3, $2}')"
+        mem_pct=$(( mem_used * 100 / mem_total ))
+        if [[ "$level" != "normal" ]] || (( mem_pct >= 85 )); then
+            top_procs=$(ps aux --sort=-%mem | awk 'NR>1 && NR<=6{printf " %s(%dMB)", $11, $6/1024}')
+            log_entry "VHD_IO:${total_kbps}KB/s MEM:${mem_info} LEVEL:${level} TOP:${top_procs}"
+        else
+            log_entry "VHD_IO:${total_kbps}KB/s MEM:${mem_info} LEVEL:${level}"
+        fi
 
         if [[ "$level" != "normal" ]]; then
             set_status "cleaning"
@@ -149,6 +161,23 @@ $(date '+%Y-%m-%d %H:%M:%S')"
             fi
             prev_level="normal"
             set_status "idle"
+        fi
+
+        # 스왑 70%+ 경고
+        local swap_used swap_total swap_pct=0
+        read -r swap_used swap_total <<< "$(free -m | awk '/Swap:/{print $3, $2}')"
+        if (( swap_total > 0 )); then
+            swap_pct=$(( swap_used * 100 / swap_total ))
+        fi
+        if (( swap_pct >= 70 )) && [[ "$swap_warned" == false ]]; then
+            send_telegram "⚠️ <b>스왑 경고 ${swap_pct}%</b>
+SWAP: ${swap_used}M/${swap_total}M
+MEM: ${mem_info}
+TOP:${top_procs}
+$(date '+%Y-%m-%d %H:%M:%S')"
+            swap_warned=true
+        elif (( swap_pct < 50 )); then
+            swap_warned=false
         fi
 
         prev_rd=$curr_rd
