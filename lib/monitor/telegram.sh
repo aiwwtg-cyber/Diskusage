@@ -27,9 +27,15 @@ send_telegram() {
 }
 
 notify_monitor_started() {
-    send_telegram "✅ <b>Diskusage Monitor Started</b>
+    local msg="✅ <b>Diskusage Monitor Started</b>
 $(date '+%Y-%m-%d %H:%M:%S')
 PID: $$"
+    [[ -z "$_TELEGRAM_BOT_TOKEN" || -z "$_TELEGRAM_CHAT_ID" ]] && return 0
+    curl -s -X POST "https://api.telegram.org/bot${_TELEGRAM_BOT_TOKEN}/sendMessage" \
+        -d chat_id="$_TELEGRAM_CHAT_ID" \
+        -d text="$msg" \
+        -d parse_mode="HTML" \
+        --max-time 5 >/dev/null 2>&1
 }
 
 notify_monitor_stopped() {
