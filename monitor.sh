@@ -102,8 +102,6 @@ _monitor_loop() {
     local prev_rd=0 prev_wr=0
     local first_read=true
     local prev_level="normal"
-    local last_tg_notify=0
-    local swap_warned=false
 
     while true; do
         local stats
@@ -145,39 +143,10 @@ _monitor_loop() {
             set_status "cleaning"
             run_cleanup "$level"
             set_status "monitoring"
-            # 텔레그램 알림 (레벨 변화 시 또는 5분마다)
-            local now_tg
-            now_tg=$(date +%s)
-            if [[ "$level" != "$prev_level" ]] || (( now_tg - last_tg_notify > 300 )); then
-                notify_level_change "$level" "$total_kbps" "$mem_info"
-                last_tg_notify=$now_tg
-            fi
             prev_level="$level"
         else
-            if [[ "$prev_level" != "normal" ]]; then
-                send_telegram "✅ <b>정상 복귀</b>
-I/O: ${total_kbps} KB/s
-$(date '+%Y-%m-%d %H:%M:%S')"
-            fi
             prev_level="normal"
             set_status "idle"
-        fi
-
-        # 스왑 70%+ 경고
-        local swap_used swap_total swap_pct=0
-        read -r swap_used swap_total <<< "$(free -m | awk '/Swap:/{print $3, $2}')"
-        if (( swap_total > 0 )); then
-            swap_pct=$(( swap_used * 100 / swap_total ))
-        fi
-        if (( swap_pct >= 70 )) && [[ "$swap_warned" == false ]]; then
-            send_telegram "⚠️ <b>스왑 경고 ${swap_pct}%</b>
-SWAP: ${swap_used}M/${swap_total}M
-MEM: ${mem_info}
-TOP:${top_procs}
-$(date '+%Y-%m-%d %H:%M:%S')"
-            swap_warned=true
-        elif (( swap_pct < 50 )); then
-            swap_warned=false
         fi
 
         prev_rd=$curr_rd

@@ -16,20 +16,8 @@ load_telegram_config() {
     fi
 }
 
-send_telegram() {
+_send_telegram() {
     local msg="$1"
-    [[ -z "$_TELEGRAM_BOT_TOKEN" || -z "$_TELEGRAM_CHAT_ID" ]] && return 0
-    curl -s -X POST "https://api.telegram.org/bot${_TELEGRAM_BOT_TOKEN}/sendMessage" \
-        -d chat_id="$_TELEGRAM_CHAT_ID" \
-        -d text="$msg" \
-        -d parse_mode="HTML" \
-        --max-time 5 >/dev/null 2>&1 &
-}
-
-notify_monitor_started() {
-    local msg="✅ <b>Diskusage Monitor Started</b>
-$(date '+%Y-%m-%d %H:%M:%S')
-PID: $$"
     [[ -z "$_TELEGRAM_BOT_TOKEN" || -z "$_TELEGRAM_CHAT_ID" ]] && return 0
     curl -s -X POST "https://api.telegram.org/bot${_TELEGRAM_BOT_TOKEN}/sendMessage" \
         -d chat_id="$_TELEGRAM_CHAT_ID" \
@@ -38,27 +26,13 @@ PID: $$"
         --max-time 5 >/dev/null 2>&1
 }
 
-notify_monitor_stopped() {
-    send_telegram "🛑 <b>Diskusage Monitor Stopped</b>
-$(date '+%Y-%m-%d %H:%M:%S')"
+notify_monitor_started() {
+    _send_telegram "✅ <b>Diskusage Monitor Started</b>
+$(date '+%Y-%m-%d %H:%M:%S')
+PID: $$"
 }
 
-notify_level_change() {
-    local level="$1"
-    local total_kbps="$2"
-    local mem_info="$3"
-
-    local emoji icon
-    case "$level" in
-        warn)   emoji="⚠️"; icon="Warning" ;;
-        alert)  emoji="🟠"; icon="Alert" ;;
-        danger) emoji="🔴"; icon="DANGER" ;;
-        *)      return 0 ;;
-    esac
-
-    send_telegram "${emoji} <b>Diskusage ${icon}</b>
-Level: ${level}
-I/O: ${total_kbps} KB/s
-${mem_info}
+notify_monitor_stopped() {
+    _send_telegram "🛑 <b>Diskusage Monitor Stopped</b>
 $(date '+%Y-%m-%d %H:%M:%S')"
 }
