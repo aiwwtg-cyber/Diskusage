@@ -131,6 +131,7 @@ $null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action {
 $state = New-EscalationState
 $wslFrozen = $false       # WSL 먹통 상태 추적
 $consecutiveTimeouts = 0  # wsl -e 연속 타임아웃 횟수
+$callbackJob = $null      # 텔레그램 버튼 콜백 리스너 job
 
 while ($true) {
     $vhdIo = Get-VhdIoRate
@@ -149,6 +150,13 @@ while ($true) {
                 Write-Host "$(Get-Date -Format 'HH:mm:ss') ⚠️  WSL FROZEN detected!" -ForegroundColor Red
                 if ($telegramReady) {
                     Send-WslFrozenAlert -TotalMBps $vhdIo.TotalMBps -DiskPct $diskPct -MemoryMB $memMB
+                    # 이전 리스너가 있으면 정리
+                    if ($callbackJob) {
+                        Stop-Job $callbackJob -ErrorAction SilentlyContinue
+                        Remove-Job $callbackJob -Force -ErrorAction SilentlyContinue
+                    }
+                    # 텔레그램 버튼 콜백 대기 (백그라운드)
+                    $callbackJob = Start-TelegramCallbackListener -TimeoutSec 300
                 }
             }
         }
@@ -162,6 +170,16 @@ while ($true) {
                 }
             }
             $consecutiveTimeouts = 0
+        }
+    }
+
+    # 콜백 job 완료 확인 및 정리
+    if ($callbackJob -and $callbackJob.State -ne 'Running') {
+        $result = Receive-Job $callbackJob -ErrorAction SilentlyContinue
+        Remove-Job $callbackJob -Force -ErrorAction SilentlyContinue
+        $callbackJob = $null
+        if ($result) {
+            Write-WatchdogLog "CALLBACK: user selected '$result'"
         }
     }
 

@@ -33,7 +33,8 @@ function Initialize-Telegram {
 function Send-TelegramMessage {
     param(
         [Parameter(Mandatory=$true)]
-        [string]$Message
+        [string]$Message,
+        [string]$ReplyMarkupJson = $null
     )
 
     if (-not $script:TelegramBotToken -or -not $script:TelegramChatId) {
@@ -46,6 +47,9 @@ function Send-TelegramMessage {
             chat_id = $script:TelegramChatId
             text = $Message
             parse_mode = "HTML"
+        }
+        if ($ReplyMarkupJson) {
+            $body.reply_markup = $ReplyMarkupJson
         }
         Invoke-RestMethod -Uri $url -Method Post -Body $body -TimeoutSec 10 | Out-Null
     }
@@ -67,9 +71,108 @@ Time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
 VHD I/O: $TotalMBps MB/s
 Disk: $DiskPct%
 Memory: ${memGB}GB
-<code>wsl -e</code> 응답 없음
+
+어떻게 할까요? (5분 내 선택)
 "@
-    Send-TelegramMessage -Message $msg
+    $keyboard = @{
+        inline_keyboard = @(
+            ,@( @{ text = "🔄 Shutdown + Restart"; callback_data = "wsl_restart" } ),
+            ,@( @{ text = "🛑 Just Shutdown";      callback_data = "wsl_shutdown" } ),
+            ,@( @{ text = "❌ Ignore";             callback_data = "ignore" } )
+        )
+    } | ConvertTo-Json -Depth 5 -Compress
+    Send-TelegramMessage -Message $msg -ReplyMarkupJson $keyboard
+}
+
+function Start-TelegramCallbackListener {
+    # WSL 먹통 시 버튼 클릭 대기 (백그라운드 job)
+    # 버튼 클릭되면 해당 액션을 자동 실행
+    param([int]$TimeoutSec = 300)
+
+    $token = $script:TelegramBotToken
+    $chatId = $script:TelegramChatId
+
+    if (-not $token -or -not $chatId) {
+        return $null
+    }
+
+    Start-Job -Name "DiskusageCallback" -ScriptBlock {
+        param($token, $chatId, $timeoutSec)
+
+        function Send-Msg($text) {
+            try {
+                Invoke-RestMethod -Uri "https://api.telegram.org/bot$token/sendMessage" `
+                    -Method Post `
+                    -Body @{ chat_id = $chatId; text = $text; parse_mode = "HTML" } `
+                    -TimeoutSec 10 | Out-Null
+            } catch {}
+        }
+
+        # 기존 업데이트 건너뛰기 위한 초기 offset 설정
+        $offset = 0
+        try {
+            $init = Invoke-RestMethod -Uri "https://api.telegram.org/bot$token/getUpdates" -Method Get -TimeoutSec 10
+            if ($init.result -and $init.result.Count -gt 0) {
+                $offset = ($init.result | ForEach-Object { $_.update_id } | Measure-Object -Maximum).Maximum + 1
+            }
+        } catch {}
+
+        $deadline = (Get-Date).AddSeconds($timeoutSec)
+
+        while ((Get-Date) -lt $deadline) {
+            try {
+                $allowed = [uri]::EscapeDataString('["callback_query"]')
+                $url = "https://api.telegram.org/bot$token/getUpdates?offset=$offset&timeout=25&allowed_updates=$allowed"
+                $response = Invoke-RestMethod -Uri $url -Method Get -TimeoutSec 30
+                foreach ($update in $response.result) {
+                    $offset = $update.update_id + 1
+                    if (-not $update.callback_query) { continue }
+
+                    $cq = $update.callback_query
+                    if ("$($cq.message.chat.id)" -ne "$chatId") { continue }
+
+                    # 버튼 클릭 응답 (로딩 표시 제거)
+                    try {
+                        Invoke-RestMethod -Uri "https://api.telegram.org/bot$token/answerCallbackQuery" `
+                            -Method Post `
+                            -Body @{ callback_query_id = $cq.id } `
+                            -TimeoutSec 10 | Out-Null
+                    } catch {}
+
+                    $action = $cq.data
+
+                    switch ($action) {
+                        "wsl_restart" {
+                            Send-Msg "🔄 <b>WSL Shutdown + Restart 실행 중...</b>"
+                            & wsl --shutdown 2>&1 | Out-Null
+                            Start-Sleep -Seconds 3
+                            # 백그라운드로 WSL 재시작 + 모니터 자동 시작
+                            Start-Process -FilePath "wsl.exe" `
+                                -ArgumentList '-e','bash','-c','cd ~/project/Diskusage && ./monitor.sh start' `
+                                -WindowStyle Hidden -Wait
+                            Send-Msg "✅ <b>WSL 재시작 완료</b>`nMonitor 자동 시작됨"
+                            return "wsl_restart"
+                        }
+                        "wsl_shutdown" {
+                            Send-Msg "🛑 <b>WSL Shutdown 실행 중...</b>"
+                            & wsl --shutdown 2>&1 | Out-Null
+                            Send-Msg "⚫ <b>WSL 종료 완료</b>"
+                            return "wsl_shutdown"
+                        }
+                        "ignore" {
+                            Send-Msg "❌ 무시 선택됨"
+                            return "ignore"
+                        }
+                    }
+                }
+            } catch {
+                Start-Sleep -Seconds 3
+            }
+        }
+
+        Send-Msg "⏰ <b>선택 타임아웃 (5분)</b>`n자동 작업 없이 대기합니다."
+        return "timeout"
+    } -ArgumentList $token, $chatId, $TimeoutSec
 }
 
 function Send-WslRecoveredAlert {
