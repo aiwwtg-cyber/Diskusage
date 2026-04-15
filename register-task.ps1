@@ -13,53 +13,93 @@ if (-not (Test-Path $ScriptPath)) {
 }
 
 # 기존 작업 제거 (재등록 시)
-$existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-if ($existing) {
+& schtasks.exe /Query /TN $TaskName 2>$null | Out-Null
+if ($LASTEXITCODE -eq 0) {
     Write-Host "Removing existing task: $TaskName" -ForegroundColor Yellow
-    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+    & schtasks.exe /Delete /TN $TaskName /F | Out-Null
 }
 
-# Action: PowerShell 창 숨김 실행
-$action = New-ScheduledTaskAction `
-    -Execute "powershell.exe" `
-    -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -NoProfile -File `"$ScriptPath`""
+# XML 정의로 작업 등록 (가장 확실한 방법)
+$userId = "$env:USERDOMAIN\$env:USERNAME"
+$cmd = "powershell.exe"
+$args = "-WindowStyle Hidden -ExecutionPolicy Bypass -NoProfile -File `"$ScriptPath`""
 
-# Trigger: 로그온 시
-$trigger = New-ScheduledTaskTrigger -AtLogOn
+$xml = @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Diskusage WSL Watchdog - WSL frozen detection with Telegram alerts</Description>
+    <Author>$userId</Author>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>$userId</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>$userId</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>$cmd</Command>
+      <Arguments>$args</Arguments>
+      <WorkingDirectory>$PSScriptRoot</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+"@
 
-# Settings: 배터리에서도 실행, 재시작 허용, 무제한 실행
-$settings = New-ScheduledTaskSettingsSet `
-    -AllowStartIfOnBatteries `
-    -DontStopIfGoingOnBatteries `
-    -StartWhenAvailable `
-    -RestartCount 3 `
-    -RestartInterval (New-TimeSpan -Minutes 1) `
-    -ExecutionTimeLimit (New-TimeSpan -Days 0)
+# XML 파일로 저장 후 등록 (UTF-16)
+$xmlPath = Join-Path $env:TEMP "diskusage-task.xml"
+[System.IO.File]::WriteAllText($xmlPath, $xml, [System.Text.Encoding]::Unicode)
 
-# Principal: 현재 사용자, 최고 권한 X (MessageBox 필요하니 일반 사용자)
-$principal = New-ScheduledTaskPrincipal `
-    -UserId $env:USERNAME `
-    -LogonType Interactive `
-    -RunLevel Limited
+& schtasks.exe /Create /TN $TaskName /XML $xmlPath /F
+$exitCode = $LASTEXITCODE
+Remove-Item $xmlPath -Force -ErrorAction SilentlyContinue
 
-Register-ScheduledTask `
-    -TaskName $TaskName `
-    -Action $action `
-    -Trigger $trigger `
-    -Settings $settings `
-    -Principal $principal `
-    -Description "Diskusage WSL Watchdog — WSL 먹통 감지 및 텔레그램 알림" | Out-Null
+if ($exitCode -ne 0) {
+    Write-Host "`n[ERROR] schtasks failed with exit code $exitCode" -ForegroundColor Red
+    exit $exitCode
+}
 
-Write-Host "`n✅ 작업 스케줄러 등록 완료: $TaskName" -ForegroundColor Green
+Write-Host "`n[OK] Task registered: $TaskName" -ForegroundColor Green
 Write-Host ""
-Write-Host "지금 바로 시작하려면:" -ForegroundColor Cyan
-Write-Host "  Start-ScheduledTask -TaskName $TaskName"
+Write-Host "Start now:" -ForegroundColor Cyan
+Write-Host "  schtasks /Run /TN $TaskName"
 Write-Host ""
-Write-Host "중지하려면:" -ForegroundColor Cyan
-Write-Host "  Stop-ScheduledTask -TaskName $TaskName"
+Write-Host "Stop:" -ForegroundColor Cyan
+Write-Host "  schtasks /End /TN $TaskName"
 Write-Host ""
-Write-Host "제거하려면:" -ForegroundColor Cyan
-Write-Host "  Unregister-ScheduledTask -TaskName $TaskName -Confirm:`$false"
+Write-Host "Remove:" -ForegroundColor Cyan
+Write-Host "  schtasks /Delete /TN $TaskName /F"
 Write-Host ""
-Write-Host "상태 확인:" -ForegroundColor Cyan
-Write-Host "  Get-ScheduledTask -TaskName $TaskName | Get-ScheduledTaskInfo"
+Write-Host "Status:" -ForegroundColor Cyan
+Write-Host "  schtasks /Query /TN $TaskName /V /FO LIST"
