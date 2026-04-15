@@ -18,6 +18,7 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . "$ScriptDir\lib\watchdog\counters.ps1"
 . "$ScriptDir\lib\watchdog\escalation.ps1"
 . "$ScriptDir\lib\watchdog\notification.ps1"
+. "$ScriptDir\lib\watchdog\telegram.ps1"
 
 # Load config with defaults
 $Config = @{
@@ -87,6 +88,19 @@ function Get-WslMonitorStatus {
     return "unreachable"
 }
 
+function Test-WslResponsive {
+    # 빠른 응답성 체크 (3초 타임아웃)
+    $job = Start-Job -ScriptBlock { wsl -e true }
+    $completed = $job | Wait-Job -Timeout 3
+    if ($null -eq $completed) {
+        $job | Stop-Job
+        $job | Remove-Job -Force
+        return $false
+    }
+    $job | Remove-Job -Force
+    return $true
+}
+
 # Check Hyper-V counter availability
 $hasHyperV = (Get-WslVhdPaths).Count -gt 0
 if (-not $hasHyperV) {
@@ -95,20 +109,61 @@ if (-not $hasHyperV) {
 }
 
 $notifyMethod = Get-NotificationMethod
+$telegramReady = Initialize-Telegram
+
 Write-Host "=== Diskusage Watchdog ===" -ForegroundColor Cyan
 Write-Host "Notification: $notifyMethod"
+Write-Host "Telegram: $(if ($telegramReady) {'Ready'} else {'Disabled'})"
 Write-Host "Hyper-V Counters: $(if ($hasHyperV) {'Available'} else {'Fallback mode'})"
 Write-Host "Interval: $($Config.MonitorInterval)s"
 Write-Host "Press Ctrl+C to stop."
 Write-Host ""
 
+# Telegram: watchdog started
+if ($telegramReady) { Send-WatchdogStarted }
+
+# Register stop notification on exit
+$null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action {
+    if ($script:TelegramBotToken) { Send-WatchdogStopped }
+}
+
 # Main loop
 $state = New-EscalationState
+$wslFrozen = $false       # WSL 먹통 상태 추적
+$consecutiveTimeouts = 0  # wsl -e 연속 타임아웃 횟수
 
 while ($true) {
     $vhdIo = Get-VhdIoRate
     $diskPct = Get-PhysicalDiskPercent
     $memMB = Get-VmmemMemoryMB
+
+    # WSL 응답성 감시 (VHD I/O 높거나 디스크 50%+ 일 때만 체크 — 오버헤드 절감)
+    if ($vhdIo.TotalMBps -ge 50 -or $diskPct -ge 50 -or $wslFrozen) {
+        $isResponsive = Test-WslResponsive
+        if (-not $isResponsive) {
+            $consecutiveTimeouts++
+            # 연속 2회 타임아웃 시 먹통 판정
+            if ($consecutiveTimeouts -ge 2 -and -not $wslFrozen) {
+                $wslFrozen = $true
+                Write-WatchdogLog "WSL_FROZEN: $consecutiveTimeouts consecutive wsl -e timeouts"
+                Write-Host "$(Get-Date -Format 'HH:mm:ss') ⚠️  WSL FROZEN detected!" -ForegroundColor Red
+                if ($telegramReady) {
+                    Send-WslFrozenAlert -TotalMBps $vhdIo.TotalMBps -DiskPct $diskPct -MemoryMB $memMB
+                }
+            }
+        }
+        else {
+            if ($wslFrozen) {
+                $wslFrozen = $false
+                Write-WatchdogLog "WSL_RECOVERED"
+                Write-Host "$(Get-Date -Format 'HH:mm:ss') ✅ WSL recovered" -ForegroundColor Green
+                if ($telegramReady) {
+                    Send-WslRecoveredAlert
+                }
+            }
+            $consecutiveTimeouts = 0
+        }
+    }
 
     $wslIsCause = $true
     if ($hasHyperV) {
