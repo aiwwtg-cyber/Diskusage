@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Diskusage Windows Watchdog — WSL2 VHD I/O 감시 + 단계적 대응

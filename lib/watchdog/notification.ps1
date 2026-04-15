@@ -1,4 +1,4 @@
-# notification.ps1 — 토스트 알림 + 폴백
+﻿# notification.ps1 — 토스트 알림 + 폴백
 
 function Test-BurntToastAvailable {
     try {

@@ -1,4 +1,4 @@
-# escalation.ps1 — 임계값 평가 + 상태 머신
+﻿# escalation.ps1 — 임계값 평가 + 상태 머신
 
 $script:LevelOrder = @("normal", "warn", "alert", "danger", "critical")
 $script:LevelActions = @{

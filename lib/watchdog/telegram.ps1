@@ -1,4 +1,4 @@
-# telegram.ps1 — Windows 측 텔레그램 알림
+﻿# telegram.ps1 — Windows 측 텔레그램 알림
 
 $script:TelegramBotToken = ""
 $script:TelegramChatId = ""

@@ -1,4 +1,4 @@
-# counters.ps1 — Hyper-V Virtual Storage Device 카운터 읽기
+﻿# counters.ps1 — Hyper-V Virtual Storage Device 카운터 읽기
 
 function Get-WslVhdPaths {
     try {

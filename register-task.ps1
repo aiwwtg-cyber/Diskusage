@@ -6,9 +6,14 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 
 $TaskName = "DiskusageWatchdog"
 $ScriptPath = Join-Path $PSScriptRoot "watchdog.ps1"
+$VbsPath = Join-Path $PSScriptRoot "watchdog-hidden.vbs"
 
 if (-not (Test-Path $ScriptPath)) {
     Write-Host "[ERROR] watchdog.ps1 not found at: $ScriptPath" -ForegroundColor Red
+    exit 1
+}
+if (-not (Test-Path $VbsPath)) {
+    Write-Host "[ERROR] watchdog-hidden.vbs not found at: $VbsPath" -ForegroundColor Red
     exit 1
 }
 
@@ -21,8 +26,8 @@ if ($LASTEXITCODE -eq 0) {
 
 # XML 정의로 작업 등록 (가장 확실한 방법)
 $userId = "$env:USERDOMAIN\$env:USERNAME"
-$cmd = "powershell.exe"
-$args = "-WindowStyle Hidden -ExecutionPolicy Bypass -NoProfile -File `"$ScriptPath`""
+$cmd = "wscript.exe"
+$args = "`"$VbsPath`""
 
 $xml = @"
 <?xml version="1.0" encoding="UTF-16"?>
