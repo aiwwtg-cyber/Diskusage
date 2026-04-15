@@ -1,6 +1,9 @@
 # register-task.ps1 — Windows 작업 스케줄러에 Watchdog 등록
 # 로그온 시 자동 시작, 창 숨김, 사용자 세션에서 실행
 
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+
 $TaskName = "DiskusageWatchdog"
 $ScriptPath = Join-Path $PSScriptRoot "watchdog.ps1"
 
@@ -22,7 +25,7 @@ $action = New-ScheduledTaskAction `
     -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -NoProfile -File `"$ScriptPath`""
 
 # Trigger: 로그온 시
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$trigger = New-ScheduledTaskTrigger -AtLogOn
 
 # Settings: 배터리에서도 실행, 재시작 허용, 무제한 실행
 $settings = New-ScheduledTaskSettingsSet `
