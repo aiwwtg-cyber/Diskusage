@@ -46,7 +46,21 @@ do_start() {
     local pid=$!
     echo "$pid" > "$PID_FILE"
     echo "monitor started (pid: $pid)"
-    notify_monitor_started
+    # 디바운스: 60초 이상 실행되어야만 Started 알림 (짧게 죽는 사이클 스팸 방지)
+    _notify_after_debounce "$pid" &
+}
+
+_notify_after_debounce() {
+    local pid="$1"
+    local delay=60
+    sleep "$delay"
+    # 여전히 실행 중이면 알림 발송
+    if kill -0 "$pid" 2>/dev/null; then
+        # 그리고 여전히 등록된 pid인지 확인
+        if [[ -f "$PID_FILE" ]] && [[ "$(cat "$PID_FILE")" == "$pid" ]]; then
+            notify_monitor_started
+        fi
+    fi
 }
 
 do_stop() {
@@ -95,10 +109,11 @@ do_report() {
 
 _monitor_loop() {
     trap '_on_exit' EXIT TERM INT
+    _MONITOR_START_EPOCH=$(date +%s)
     set_status "idle"
     rotate_logs
     local last_rotation
-    last_rotation=$(date +%s)
+    last_rotation=$_MONITOR_START_EPOCH
     local prev_rd=0 prev_wr=0
     local first_read=true
     local prev_level="normal"
@@ -168,7 +183,13 @@ _monitor_loop() {
 }
 
 _on_exit() {
-    notify_monitor_stopped
+    # 디바운스: 60초 이상 살아있었을 때만 Stopped 알림 (짧은 사이클 스팸 방지)
+    local now
+    now=$(date +%s)
+    local uptime=$(( now - ${_MONITOR_START_EPOCH:-$now} ))
+    if (( uptime >= 60 )); then
+        notify_monitor_stopped
+    fi
     local own_pid=$$
     if [[ -f "$PID_FILE" ]] && [[ "$(cat "$PID_FILE" 2>/dev/null)" == "$own_pid" ]]; then
         rm -f "$PID_FILE" "$STATUS_FILE"
