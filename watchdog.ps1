@@ -129,9 +129,13 @@ $null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action {
 
 # Main loop
 $state = New-EscalationState
-$wslFrozen = $false       # WSL 먹통 상태 추적
-$consecutiveTimeouts = 0  # wsl -e 연속 타임아웃 횟수
-$callbackJob = $null      # 텔레그램 버튼 콜백 리스너 job
+$wslFrozen = $false            # WSL 먹통 상태 추적
+$wslFrozenAlertSent = $false   # 알림 발송 여부 (지속 30초 이상일 때만 true)
+$wslFrozenSince = $null        # 먹통 감지 시작 시각
+$consecutiveTimeouts = 0       # wsl -e 연속 타임아웃 횟수
+$callbackJob = $null           # 텔레그램 버튼 콜백 리스너 job
+
+$FrozenMinDurationSec = 30     # 이 시간 이상 지속되어야 알림 발송
 
 while ($true) {
     $vhdIo = Get-VhdIoRate
@@ -143,31 +147,43 @@ while ($true) {
         $isResponsive = Test-WslResponsive
         if (-not $isResponsive) {
             $consecutiveTimeouts++
-            # 연속 2회 타임아웃 시 먹통 판정
+            # 연속 2회 타임아웃 시 내부 frozen 플래그 세팅 (알림은 아직 안 보냄)
             if ($consecutiveTimeouts -ge 2 -and -not $wslFrozen) {
                 $wslFrozen = $true
-                Write-WatchdogLog "WSL_FROZEN: $consecutiveTimeouts consecutive wsl -e timeouts"
-                Write-Host "$(Get-Date -Format 'HH:mm:ss') ⚠️  WSL FROZEN detected!" -ForegroundColor Red
-                if ($telegramReady) {
-                    Send-WslFrozenAlert -TotalMBps $vhdIo.TotalMBps -DiskPct $diskPct -MemoryMB $memMB
-                    # 이전 리스너가 있으면 정리
-                    if ($callbackJob) {
-                        Stop-Job $callbackJob -ErrorAction SilentlyContinue
-                        Remove-Job $callbackJob -Force -ErrorAction SilentlyContinue
+                $wslFrozenSince = Get-Date
+                Write-WatchdogLog "WSL_FROZEN: $consecutiveTimeouts consecutive wsl -e timeouts (알림 보류, ${FrozenMinDurationSec}s 지속 확인 중)"
+                Write-Host "$(Get-Date -Format 'HH:mm:ss') ⚠️  WSL unresponsive (monitoring for ${FrozenMinDurationSec}s)" -ForegroundColor DarkYellow
+            }
+            # 지속 시간이 30초 이상이면 그때 알림 발송
+            if ($wslFrozen -and -not $wslFrozenAlertSent) {
+                $elapsed = ((Get-Date) - $wslFrozenSince).TotalSeconds
+                if ($elapsed -ge $FrozenMinDurationSec) {
+                    $wslFrozenAlertSent = $true
+                    Write-WatchdogLog "WSL_FROZEN_ALERT: sustained ${elapsed}s - sending alert"
+                    Write-Host "$(Get-Date -Format 'HH:mm:ss') ⚠️  WSL FROZEN sustained - alerting" -ForegroundColor Red
+                    if ($telegramReady) {
+                        Send-WslFrozenAlert -TotalMBps $vhdIo.TotalMBps -DiskPct $diskPct -MemoryMB $memMB
+                        if ($callbackJob) {
+                            Stop-Job $callbackJob -ErrorAction SilentlyContinue
+                            Remove-Job $callbackJob -Force -ErrorAction SilentlyContinue
+                        }
+                        $callbackJob = Start-TelegramCallbackListener -TimeoutSec 300
                     }
-                    # 텔레그램 버튼 콜백 대기 (백그라운드)
-                    $callbackJob = Start-TelegramCallbackListener -TimeoutSec 300
                 }
             }
         }
         else {
             if ($wslFrozen) {
                 $wslFrozen = $false
-                Write-WatchdogLog "WSL_RECOVERED"
-                Write-Host "$(Get-Date -Format 'HH:mm:ss') ✅ WSL recovered" -ForegroundColor Green
-                if ($telegramReady) {
+                $elapsed = if ($wslFrozenSince) { ((Get-Date) - $wslFrozenSince).TotalSeconds } else { 0 }
+                Write-WatchdogLog "WSL_RECOVERED (frozen for ${elapsed}s, alert sent: $wslFrozenAlertSent)"
+                Write-Host "$(Get-Date -Format 'HH:mm:ss') ✅ WSL recovered (was ${elapsed}s)" -ForegroundColor Green
+                # 먹통 알림이 실제로 발송된 경우에만 복구 알림 발송
+                if ($wslFrozenAlertSent -and $telegramReady) {
                     Send-WslRecoveredAlert
                 }
+                $wslFrozenAlertSent = $false
+                $wslFrozenSince = $null
             }
             $consecutiveTimeouts = 0
         }
