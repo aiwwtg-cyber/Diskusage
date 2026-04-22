@@ -182,6 +182,13 @@ while ($true) {
                 if ($wslFrozenAlertSent -and $telegramReady) {
                     Send-WslRecoveredAlert
                 }
+                # 복구되면 대기 중인 콜백 리스너도 종료 (타임아웃 메시지 방지)
+                if ($callbackJob -and $callbackJob.State -eq 'Running') {
+                    Stop-Job $callbackJob -ErrorAction SilentlyContinue
+                    Remove-Job $callbackJob -Force -ErrorAction SilentlyContinue
+                    $callbackJob = $null
+                    Write-WatchdogLog "CALLBACK_LISTENER_CANCELED: WSL recovered"
+                }
                 $wslFrozenAlertSent = $false
                 $wslFrozenSince = $null
             }
