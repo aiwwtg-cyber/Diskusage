@@ -34,28 +34,46 @@ function Send-TelegramMessage {
     param(
         [Parameter(Mandatory=$true)]
         [string]$Message,
-        [string]$ReplyMarkupJson = $null
+        [string]$ReplyMarkupJson = $null,
+        [int]$MaxAttempts = 3
     )
 
     if (-not $script:TelegramBotToken -or -not $script:TelegramChatId) {
+        _TelegramLog "[SKIP] Token or ChatID missing"
         return
     }
 
-    try {
-        $url = "https://api.telegram.org/bot$($script:TelegramBotToken)/sendMessage"
-        $body = @{
-            chat_id = $script:TelegramChatId
-            text = $Message
-            parse_mode = "HTML"
-        }
-        if ($ReplyMarkupJson) {
-            $body.reply_markup = $ReplyMarkupJson
-        }
-        Invoke-RestMethod -Uri $url -Method Post -Body $body -TimeoutSec 10 | Out-Null
+    $url = "https://api.telegram.org/bot$($script:TelegramBotToken)/sendMessage"
+    $body = @{
+        chat_id = $script:TelegramChatId
+        text = $Message
+        parse_mode = "HTML"
     }
-    catch {
-        Write-Host "[ERROR] Telegram send failed: $_" -ForegroundColor Red
+    if ($ReplyMarkupJson) {
+        $body.reply_markup = $ReplyMarkupJson
     }
+
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        try {
+            Invoke-RestMethod -Uri $url -Method Post -Body $body -TimeoutSec 15 | Out-Null
+            if ($attempt -gt 1) { _TelegramLog "[OK] sent on retry #$attempt" }
+            return
+        }
+        catch {
+            _TelegramLog "[ERROR attempt $attempt/$MaxAttempts] $($_.Exception.Message)"
+            if ($attempt -lt $MaxAttempts) { Start-Sleep -Seconds (2 * $attempt) }
+        }
+    }
+    _TelegramLog "[FAIL] gave up after $MaxAttempts attempts"
+}
+
+function _TelegramLog {
+    param([string]$Message)
+    $logDir = "$env:USERPROFILE\.diskusage\logs"
+    if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+    $logFile = Join-Path $logDir "telegram-$(Get-Date -Format 'yyyy-MM-dd').log"
+    $ts = Get-Date -Format "HH:mm:ss"
+    "[$ts] $Message" | Out-File -Append -FilePath $logFile -Encoding utf8
 }
 
 function Send-WslFrozenAlert {
