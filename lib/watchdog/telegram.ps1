@@ -44,23 +44,45 @@ function Send-TelegramMessage {
     }
 
     $url = "https://api.telegram.org/bot$($script:TelegramBotToken)/sendMessage"
-    $body = @{
+
+    # UTF-8 JSON 본문으로 전송 (form-encoded는 PS5.1에서 이모지 깨짐 → Telegram 400)
+    $payload = @{
         chat_id = $script:TelegramChatId
         text = $Message
         parse_mode = "HTML"
     }
     if ($ReplyMarkupJson) {
-        $body.reply_markup = $ReplyMarkupJson
+        # reply_markup은 객체로 들어가야 함 (이미 JSON 문자열이면 객체로 파싱)
+        try {
+            $payload.reply_markup = ($ReplyMarkupJson | ConvertFrom-Json)
+        } catch {
+            $payload.reply_markup = $ReplyMarkupJson
+        }
     }
+    $jsonBody = $payload | ConvertTo-Json -Depth 8 -Compress
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($jsonBody)
 
     for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
         try {
-            Invoke-RestMethod -Uri $url -Method Post -Body $body -TimeoutSec 15 | Out-Null
+            Invoke-RestMethod -Uri $url -Method Post -Body $bytes `
+                -ContentType "application/json; charset=utf-8" `
+                -TimeoutSec 15 | Out-Null
             if ($attempt -gt 1) { _TelegramLog "[OK] sent on retry #$attempt" }
             return
         }
         catch {
-            _TelegramLog "[ERROR attempt $attempt/$MaxAttempts] $($_.Exception.Message)"
+            $errMsg = $_.Exception.Message
+            # HTTP 응답 본문 캡처해서 텔레그램 에러 설명 확인
+            try {
+                $resp = $_.Exception.Response
+                if ($resp) {
+                    $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
+                    $respBody = $reader.ReadToEnd()
+                    $reader.Close()
+                    $errMsg += " | body: $respBody"
+                }
+            } catch {}
+            _TelegramLog "[ERROR attempt $attempt/$MaxAttempts] $errMsg"
             if ($attempt -lt $MaxAttempts) { Start-Sleep -Seconds (2 * $attempt) }
         }
     }
@@ -92,13 +114,8 @@ Memory: ${memGB}GB
 
 어떻게 할까요? (5분 내 선택)
 "@
-    $keyboard = @{
-        inline_keyboard = @(
-            ,@( @{ text = "🔄 Shutdown + Restart"; callback_data = "wsl_restart" } ),
-            ,@( @{ text = "🛑 Just Shutdown";      callback_data = "wsl_shutdown" } ),
-            ,@( @{ text = "❌ Ignore";             callback_data = "ignore" } )
-        )
-    } | ConvertTo-Json -Depth 5 -Compress
+    # JSON 문자열을 직접 작성 (PowerShell 5.1의 배열 unrolling 문제 회피)
+    $keyboard = '{"inline_keyboard":[[{"text":"🔄 Shutdown + Restart","callback_data":"wsl_restart"}],[{"text":"🛑 Just Shutdown","callback_data":"wsl_shutdown"}],[{"text":"❌ Ignore","callback_data":"ignore"}]]}'
     Send-TelegramMessage -Message $msg -ReplyMarkupJson $keyboard
 }
 
