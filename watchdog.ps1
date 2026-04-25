@@ -137,7 +137,46 @@ $callbackJob = $null           # 텔레그램 버튼 콜백 리스너 job
 
 $FrozenMinDurationSec = 30     # 이 시간 이상 지속되어야 알림 발송
 
+# 헬스체크: 매일 오전 9시에 heartbeat 전송 (워치독 살아있다는 확인용)
+$watchdogStartTime = Get-Date
+$lastHeartbeatDate = $null
+
+# 시작 셀프테스트: 5초 후 한 번 텔레그램 송신 시도하여 통신 검증
+$selftestPending = $true
+$selftestAt = (Get-Date).AddSeconds(5)
+
 while ($true) {
+    # 시작 셀프테스트: 버튼 메시지가 실제로 발송되는지 텔레그램 API에 검증만 (조용히)
+    # sendMessage 대신 getMe로 인증 확인 (메시지 안 보냄)
+    if ($selftestPending -and (Get-Date) -ge $selftestAt) {
+        $selftestPending = $false
+        if ($script:TelegramBotToken) {
+            try {
+                $r = Invoke-RestMethod -Uri "https://api.telegram.org/bot$($script:TelegramBotToken)/getMe" -TimeoutSec 10
+                if ($r.ok) {
+                    Write-WatchdogLog "SELFTEST_OK: bot authenticated as @$($r.result.username)"
+                } else {
+                    Write-WatchdogLog "SELFTEST_FAIL: getMe returned not-ok"
+                }
+            } catch {
+                Write-WatchdogLog "SELFTEST_FAIL: $($_.Exception.Message)"
+            }
+        }
+    }
+
+    # 일일 heartbeat (오전 9~10시 사이 한 번)
+    $now = Get-Date
+    if ($now.Hour -eq 9 -and $now.Date -ne $lastHeartbeatDate -and $telegramReady) {
+        $lastHeartbeatDate = $now.Date
+        $uptimeMin = [int]((Get-Date) - $watchdogStartTime).TotalMinutes
+        try {
+            Send-WatchdogHeartbeat -UptimeMinutes $uptimeMin
+            Write-WatchdogLog "HEARTBEAT sent (uptime ${uptimeMin}min)"
+        } catch {
+            Write-WatchdogLog "HEARTBEAT_FAIL: $($_.Exception.Message)"
+        }
+    }
+
     $vhdIo = Get-VhdIoRate
     $diskPct = Get-PhysicalDiskPercent
     $memMB = Get-VmmemMemoryMB

@@ -218,6 +218,19 @@ Time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
     Send-TelegramMessage -Message $msg
 }
 
+function Send-WatchdogHeartbeat {
+    param([int]$UptimeMinutes = 0)
+    $hours = [math]::Floor($UptimeMinutes / 60)
+    $mins = $UptimeMinutes % 60
+    $msg = @"
+💓 <b>Watchdog Heartbeat</b>
+Time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+Uptime: ${hours}h ${mins}m
+정상 동작 중
+"@
+    Send-TelegramMessage -Message $msg
+}
+
 function Send-WatchdogStarted {
     $msg = @"
 🟢 <b>Windows Watchdog Started</b>
