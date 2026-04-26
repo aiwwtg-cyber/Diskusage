@@ -6,9 +6,14 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 
 $TaskName = "DiskusageListener"
 $ScriptPath = Join-Path $PSScriptRoot "command-listener.ps1"
+$VbsPath = Join-Path $PSScriptRoot "listener-hidden.vbs"
 
 if (-not (Test-Path $ScriptPath)) {
     Write-Host "[ERROR] command-listener.ps1 not found" -ForegroundColor Red
+    exit 1
+}
+if (-not (Test-Path $VbsPath)) {
+    Write-Host "[ERROR] listener-hidden.vbs not found" -ForegroundColor Red
     exit 1
 }
 
@@ -67,8 +72,8 @@ $xml = @"
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>powershell.exe</Command>
-      <Arguments>-WindowStyle Hidden -ExecutionPolicy Bypass -NoProfile -File "$ScriptPath"</Arguments>
+      <Command>wscript.exe</Command>
+      <Arguments>"$VbsPath"</Arguments>
       <WorkingDirectory>$PSScriptRoot</WorkingDirectory>
     </Exec>
   </Actions>
