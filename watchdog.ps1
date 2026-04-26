@@ -137,10 +137,6 @@ $callbackJob = $null           # 텔레그램 버튼 콜백 리스너 job
 
 $FrozenMinDurationSec = 30     # 이 시간 이상 지속되어야 알림 발송
 
-# 헬스체크: 매일 오전 9시에 heartbeat 전송 (워치독 살아있다는 확인용)
-$watchdogStartTime = Get-Date
-$lastHeartbeatDate = $null
-
 # WSL VM 다운 감지
 $wslDownDetectedSince = $null
 $wslDownAlertSent = $false
@@ -165,19 +161,6 @@ while ($true) {
             } catch {
                 Write-WatchdogLog "SELFTEST_FAIL: $($_.Exception.Message)"
             }
-        }
-    }
-
-    # 일일 heartbeat (오전 9~10시 사이 한 번)
-    $now = Get-Date
-    if ($now.Hour -eq 9 -and $now.Date -ne $lastHeartbeatDate -and $telegramReady) {
-        $lastHeartbeatDate = $now.Date
-        $uptimeMin = [int]((Get-Date) - $watchdogStartTime).TotalMinutes
-        try {
-            Send-WatchdogHeartbeat -UptimeMinutes $uptimeMin
-            Write-WatchdogLog "HEARTBEAT sent (uptime ${uptimeMin}min)"
-        } catch {
-            Write-WatchdogLog "HEARTBEAT_FAIL: $($_.Exception.Message)"
         }
     }
 

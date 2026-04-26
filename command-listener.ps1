@@ -130,8 +130,10 @@ while ($true) {
             $text = $msg.text
             if (-not $text) { continue }
 
+            _ListenerLog "MSG received: $text"
+
             switch -Regex ($text) {
-                '^/start_watchdog\b' {
+                '^/start_watchdog' {
                     if (Test-WatchdogRunning) {
                         _ListenerLog "/start_watchdog: already running"
                         Send-TelegramMessage -Message "ℹ️ 워치독이 이미 실행 중입니다."
@@ -147,7 +149,8 @@ while ($true) {
                         }
                     }
                 }
-                '^/watchdog_status\b' {
+                '^/watchdog_status' {
+                    _ListenerLog "/watchdog_status received"
                     if (Test-WatchdogRunning) {
                         Send-TelegramMessage -Message "🟢 워치독 실행 중"
                     } else {
