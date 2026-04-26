@@ -141,6 +141,10 @@ $FrozenMinDurationSec = 30     # 이 시간 이상 지속되어야 알림 발송
 $watchdogStartTime = Get-Date
 $lastHeartbeatDate = $null
 
+# WSL VM 다운 감지
+$wslDownDetectedSince = $null
+$wslDownAlertSent = $false
+
 # 시작 셀프테스트: 5초 후 한 번 텔레그램 송신 시도하여 통신 검증
 $selftestPending = $true
 $selftestAt = (Get-Date).AddSeconds(5)
@@ -180,6 +184,28 @@ while ($true) {
     $vhdIo = Get-VhdIoRate
     $diskPct = Get-PhysicalDiskPercent
     $memMB = Get-VmmemMemoryMB
+
+    # WSL VM 완전 종료 감지 (vmmemWSL 메모리 0 = VM 다운)
+    if ($memMB -lt 50 -and -not $wslDownAlertSent) {
+        $wslDownDetectedSince = if ($wslDownDetectedSince) { $wslDownDetectedSince } else { Get-Date }
+        $downElapsed = ((Get-Date) - $wslDownDetectedSince).TotalSeconds
+        if ($downElapsed -ge 30) {
+            $wslDownAlertSent = $true
+            Write-WatchdogLog "WSL_VM_DOWN: vmmemWSL not running for ${downElapsed}s"
+            if ($telegramReady) {
+                Send-TelegramMessage -Message "⚫ <b>WSL VM 종료 감지</b>`nTime: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`nWSL이 완전히 멈췄습니다 (vmmemWSL 없음).`n다시 켜려면 PowerShell에서: <code>wsl</code>"
+            }
+        }
+    } elseif ($memMB -ge 50) {
+        if ($wslDownAlertSent) {
+            Write-WatchdogLog "WSL_VM_UP: vmmemWSL back (${memMB}MB)"
+            if ($telegramReady) {
+                Send-TelegramMessage -Message "🟢 <b>WSL VM 재시작됨</b>`nTime: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`nMemory: $([math]::Round($memMB/1024,1))GB"
+            }
+        }
+        $wslDownDetectedSince = $null
+        $wslDownAlertSent = $false
+    }
 
     # WSL 응답성 감시 (VHD I/O 높거나 디스크 50%+ 일 때만 체크 — 오버헤드 절감)
     if ($vhdIo.TotalMBps -ge 50 -or $diskPct -ge 50 -or $wslFrozen) {
