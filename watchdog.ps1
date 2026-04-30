@@ -176,7 +176,12 @@ while ($true) {
             $wslDownAlertSent = $true
             Write-WatchdogLog "WSL_VM_DOWN: vmmemWSL not running for ${downElapsed}s"
             if ($telegramReady) {
-                Send-TelegramMessage -Message "⚫ <b>WSL VM 종료 감지</b>`nTime: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`nWSL이 완전히 멈췄습니다 (vmmemWSL 없음).`n다시 켜려면 PowerShell에서: <code>wsl</code>"
+                Send-WslVmDownAlert
+                if ($callbackJob) {
+                    Stop-Job $callbackJob -ErrorAction SilentlyContinue
+                    Remove-Job $callbackJob -Force -ErrorAction SilentlyContinue
+                }
+                $callbackJob = Start-TelegramCallbackListener -TimeoutSec 300
             }
         }
     } elseif ($memMB -ge 50) {

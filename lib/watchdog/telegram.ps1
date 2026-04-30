@@ -210,6 +210,18 @@ function Start-TelegramCallbackListener {
     } -ArgumentList $token, $chatId, $TimeoutSec
 }
 
+function Send-WslVmDownAlert {
+    $msg = @"
+⚫ <b>WSL VM 종료 감지</b>
+Time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+WSL이 완전히 멈췄습니다 (vmmemWSL 없음).
+
+어떻게 할까요? (5분 내 선택)
+"@
+    $keyboard = '{"inline_keyboard":[[{"text":"🔄 Shutdown + Restart","callback_data":"wsl_restart"}],[{"text":"🛑 Just Shutdown","callback_data":"wsl_shutdown"}],[{"text":"❌ Ignore","callback_data":"ignore"}]]}'
+    Send-TelegramMessage -Message $msg -ReplyMarkupJson $keyboard
+}
+
 function Send-WslRecoveredAlert {
     $msg = @"
 ✅ <b>WSL 복구됨</b>
