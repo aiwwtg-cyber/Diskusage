@@ -1,0 +1,279 @@
+# Project Progress
+
+## Current Status
+
+**Phase:** 안정성 보강 (헤드리스 + 자동 부활 + 알림 신뢰성)
+**Last completed:** vmmem 와일드카드 오탐 수정 — WSL VM down 플래핑 해소 (2026-07-10)
+**Next up:** `.wslconfig` 조정안 결정 (`memory=8GB` + `autoMemoryReclaim=disabled` 적용 여부) — 사용자 회신 대기
+**Latest commit:** `58f26b6 feat: add action buttons to WSL VM down alert` (vmmem 수정 커밋 대기 중)
+
+---
+
+## 코드 인벤토리
+
+### 위치 1 — WSL git repo `/home/aiwwt/project/Diskusage/`
+
+**루트 PowerShell 스크립트**
+
+| 파일 | 역할 |
+|---|---|
+| `watchdog.ps1` | Windows 측 메인 워치독. Hyper-V VHD I/O와 vmmemWSL 메모리 폴링. `MEM < 50MB`가 30초 지속되면 `Send-WslVmDownAlert` + `Start-TelegramCallbackListener`. WSL 응답성 테스트 2회 연속 실패 → frozen 진입, 30초 지속 시 `Send-WslFrozenAlert`. **에스컬레이션 액션:** `cleanup`(warn)/`cleanup_and_notify`(alert) 시 `wsl -e ~/.diskusage/cleanup_trigger.sh <level>` 호출(WSL monitor가 이미 cleaning이면 스킵). 타임아웃 시 frozen 단계 진입. |
+| `command-listener.ps1` | 텔레그램 봇 getUpdates 롱폴링. `/start_watchdog`, `/watchdog_status` 명령 + `listener_start_watchdog` 콜백 처리. 워치독 프로세스 부재를 60초 안에 감지하면 별도 알림. |
+| `register-task.ps1` | `DiskusageWatchdog` Task Scheduler 작업 등록. LogonTrigger + TimeTrigger(PT1M Repetition) + `MultipleInstancesPolicy=IgnoreNew`. wscript.exe로 `watchdog-hidden.vbs` 실행. |
+| `register-listener-task.ps1` | `DiskusageListener` 작업 등록. 동일 트리거 패턴으로 `listener-hidden.vbs` 실행. |
+| `watchdog-hidden.vbs` | `shell.Run cmd, 0, True` 패턴으로 `watchdog.ps1`을 창 표시 0(완전 숨김)으로 실행. 내부 keepalive 루프 없음. |
+| `listener-hidden.vbs` | 동일 패턴으로 `command-listener.ps1` 실행. |
+| `test-buttons.ps1` | 텔레그램 봇 토큰 → 메시지 전송 → 콜백 수신까지 6단계 검증 스크립트. |
+| `setup.ps1`, `config.conf.default` | (최근 미수정) |
+
+**`lib/watchdog/`**
+
+| 파일 | 역할 |
+|---|---|
+| `telegram.ps1` | `Initialize-Telegram`, `Send-TelegramMessage`(UTF-8 JSON 본문, 3회 재시도), `Send-WslFrozenAlert`(3개 버튼: wsl_restart/wsl_shutdown/ignore), `Send-WslVmDownAlert`(동일 3개 버튼), `Start-TelegramCallbackListener`(Job, 5분 폴링, 버튼 클릭 시 wsl --shutdown 또는 wsl 재시작), `Send-WslRecoveredAlert`, `Send-WatchdogStarted`, `Send-WatchdogStopped`, `Send-WatchdogHeartbeat`(정의는 남아있으나 호출 없음), `_TelegramLog`(첫 시도 성공만 silent. 스킵·재시도 성공·에러·최종실패는 모두 기록). |
+| `counters.ps1`, `escalation.ps1`, `notification.ps1` | (최근 미수정) |
+
+**`lib/monitor/`** — WSL bash 측 (이번 세션 미수정, 단 **실행 중인 핵심 컴포넌트**)
+
+| 파일 | 역할 |
+|---|---|
+| `monitor.sh` | WSL 데몬. 5초 주기 `/proc/diskstats` 폴링 → `get_io_level` → normal 아니면 `set_status cleaning` + `run_cleanup` 호출 + `set_status monitoring`. warn 이상 또는 mem ≥ 85% 시 메모리 Top 5 프로세스도 로그에 기록. |
+| `lib/monitor/cleanup.sh` | `run_cleanup <level>` 함수. journalctl/tmp/fstrim 단계적 실행. |
+| `lib/monitor/config.sh` | `load_config` — 기본값 + `~/.diskusage/config/config.conf` 병합. |
+| `lib/monitor/diskstats.sh`, `logger.sh`, `telegram.sh` | I/O 계산 / 일별 로그 + 7일 로테이션 / curl 송신. |
+| `~/.diskusage/cleanup_trigger.sh` (setup.sh가 생성) | **Windows 워치독 ↔ WSL 정리 브리지.** `watchdog.ps1`이 `cleanup` (warn) 또는 `cleanup_and_notify` (alert) 액션 시 `Invoke-WslCommand`로 호출. config + cleanup.sh를 source 후 `run_cleanup $LEVEL` 실행. 단, `Get-WslMonitorStatus`가 `cleaning`이면 중복 방지로 스킵. |
+
+### 위치 2 — Windows 실행 사본 `C:\Users\aiwwt\Diskusage\`
+
+WSL repo와 **별개 사본**. 실제 워치독·리스너가 이 경로에서 실행됨. **자동 동기화 없음.**
+
+| 파일 | 시점 | 비고 |
+|---|---|---|
+| `watchdog.ps1` | May 2 07:53 | repo 최신본과 동기화됨 |
+| `lib/watchdog/telegram.ps1` | May 2 07:53 | repo 최신본과 동기화됨 |
+| 나머지 (`command-listener.ps1`, `register-*.ps1`, VBS, `setup.ps1` 등) | Apr 26~27 | 코드 변경 없어 미동기화 |
+
+### 위치 3 — Windows 시스템 설정
+
+| 경로 | 내용 |
+|---|---|
+| `C:\Users\aiwwt\.wslconfig` | `[wsl2] memory=10GB swap=4GB processors=4 networkingMode=mirrored` / `[experimental] autoMemoryReclaim=gradual sparseVhd=true` |
+| `C:\Users\aiwwt\.diskusage\config\telegram.conf` | `BOT_TOKEN`, `CHAT_ID=7437534009` |
+| `C:\Users\aiwwt\.diskusage\logs\` | `watchdog-YYYY-MM-DD.log`, `listener-YYYY-MM-DD.log`, `telegram-YYYY-MM-DD.log`(에러 시에만 작성) |
+
+### Task Scheduler 등록
+
+| 작업명 | 상태 | 비고 |
+|---|---|---|
+| `DiskusageWatchdog` | Running | 1분마다 살아있는지 체크, 죽었으면 부활 |
+| `DiskusageListener` | Running | 동일 패턴 |
+
+### 외부 작업 (이 프로젝트 외부, 본 프로젝트와 상호작용)
+
+| 작업명 | 트리거 | 동작 |
+|---|---|---|
+| `WSL Weekly VHDX Backup` | 매주 월 05:00 | `wsl --shutdown` → `wsl --export Ubuntu <OneDrive>\광장주류\백업\ubuntu_*.vhdx --vhd` → 최신 3개 보존 → `wsl -d Ubuntu -e true` |
+| `Scripts Weekly Backup` | 매주 월 05:30 | `C:\Users\aiwwt\Scripts\Scripts-Backup\scripts-backup.ps1` 실행 |
+
+---
+
+## Work Log
+
+### 2026-07-10 — vmmem 와일드카드 오탐 수정 (WSL VM down 플래핑 해소)
+
+- **What was done:** 7/9~7/10 반복된 "WSL VM 종료/재시작" 알림이 오탐임을 규명하고 원인(`Get-VmmemMemoryMB`의 `vmmem*` 와일드카드가 7/9 06:38 생성된 Claude Desktop Cowork 샌드박스 VM `vmmem`을 매칭)을 수정 — `vmmemWSL` 정확 일치로 변경, Windows 사본 동기화, 워치독 재시작.
+- **Artifacts:** `lib/watchdog/counters.ps1:56-58` (repo + `C:\Users\aiwwt\Diskusage` 사본), `docs/plans/2026-07-10-fix-vmmem-wildcard-false-down.md`
+- **Verification:** 재시작 후 MEM 2.8→4.1GB(실제 vmmemWSL), WSL_VM_DOWN 0건, SELFTEST_OK, 단일 인스턴스(PID 32368). WSL VM은 7/5 05:06부터 무중단이었음을 프로세스 생성 시각으로 입증 — 7/9~7/10 down 알림 6건 전부 오탐.
+- **Known limitations:** Cowork VM(커밋 4.1GB)은 그대로 실행 중(사용자 결정 대기). down 판정은 여전히 워킹셋<50MB 프록시(프로세스 부재 기반 아님). 6/19 기동 옛 워치독이 7/10까지 살아있던 중복 인스턴스 문제 재확인.
+
+### 2026-05-02 — WSL VM down 알림 버튼화 + Windows 사본 동기화
+
+- **What was done:**
+  - `lib/watchdog/telegram.ps1`에 `Send-WslVmDownAlert` 함수 추가. frozen 알림과 동일한 3-버튼 inline_keyboard(`wsl_restart`/`wsl_shutdown`/`ignore`) 부착.
+  - `watchdog.ps1`의 VM down 분기를 단순 텍스트 메시지에서 `Send-WslVmDownAlert` + `Start-TelegramCallbackListener` 시작으로 변경.
+  - WSL repo의 두 파일을 Windows 실행 사본(`C:\Users\aiwwt\Diskusage\`)으로 복사.
+  - 옛 워치독 프로세스(PID 7120, 04-30 기동분) 종료, 새 프로세스(PID 29712, 05-02 07:53) 가동.
+- **Artifacts:**
+  - 커밋 `58f26b6 feat: add action buttons to WSL VM down alert`
+  - `lib/watchdog/telegram.ps1:213-224` (Send-WslVmDownAlert 정의)
+  - `watchdog.ps1:177-185` (호출부)
+- **Verification:**
+  - Windows 사본 파일 mtime이 May 2 07:53로 갱신됨 확인.
+  - 새 워치독 프로세스 CreationDate=2026-05-02 07:53:18 확인 (`Get-CimInstance Win32_Process`).
+  - ⚠️ **실제 VM down 트리거로 버튼이 정상 노출되는지는 미검증.** 5/2 07:53 새 워치독 가동 후 본 진단 시점까지 VM down 사례가 없어 end-to-end 검증 미완료. 다음 다운 시 확인 필요.
+- **Known limitations:**
+  - WSL repo와 Windows 사본은 자동 동기화되지 않음. 향후 파일 변경 시 `cp` + 워치독 프로세스 재시작 필요.
+  - `Just Shutdown` 버튼은 VM이 이미 다운된 상태에선 의미 없는 액션이지만 UX 일관성 위해 유지.
+
+### 2026-05-03 — 메모리 누수 점검 + memento MCP 완전 제거
+
+- **What was done:**
+  - 새벽 05:00경 시작된 1.5시간 WSL 다운 사태 원인 분석.
+  - WSL 측 메모리 누수 점검: 프로세스 RSS 분포, FD 카운트, Threads, OOM 이력, slab, 시간별 평균 메모리 변동.
+  - Docker 컨테이너별 메모리 사용량 측정 — `memento-memento-1`이 1.23GB로 단일 최대.
+  - 사용자 결정에 따라 memento MCP 서버 흔적 완전 제거 (Docker artifacts + 프로젝트 디렉터리 + MCP 설정 + 캐시).
+  - `/mcp` 결과로 사용자 레벨 설정에 별도 잔존 확인되어 추가 정리.
+- **Artifacts (제거된 항목):**
+  - Docker 컨테이너: `memento-memento-1`, `memento-redis-1`, `memento-postgres-1`
+  - Docker 이미지: `memento-memento:latest`(1.83GB), `pgvector/pgvector:pg16`(621MB)
+  - Docker 볼륨: `memento_pgdata`, `memento_redisdata`
+  - Docker 네트워크: `memento_default`
+  - 디렉터리: `/home/aiwwt/project/Memento/`
+  - 캐시: `~/.cache/claude-cli-nodejs/*/mcp-logs-memento/` (16개)
+  - 설정: `~/.claude/.mcp.json`의 `mcpServers.memento`, `~/.claude.json`의 `mcpServers.memento` + `skillUsage.mcp__memento__onboarding`
+  - 백업 보관: `~/.claude/.mcp.json.bak.20260503`, `~/.claude.json.bak.20260503`
+- **Verification:**
+  - `docker ps -a`, `docker images`, `docker volume ls`, `docker network ls`에서 memento 관련 항목 0건.
+  - `/mcp` 다이얼로그에서 memento 항목 사라짐 확인.
+  - MCP 도구(`mcp__memento__*`)가 즉시 disconnect됨.
+- **Known limitations:**
+  - 백업 후 재시작 폭주 패턴은 memento 제거만으로는 해결 안 됨. `.wslconfig` 조정이 별도로 필요.
+  - 과거 대화 로그(`.jsonl`)에는 "memento" 문자열이 남아있음 — 사용자 합의로 손대지 않음.
+
+### 2026-04-30 — 같은 패턴의 두 번째 VM down 사태 분석 + 워치독 재시작 절차 정립
+
+- **What was done:**
+  - 10:54:45 VM down 알림이 옛 텍스트 형식으로 도착(버튼 없음) 원인 추적.
+  - 원인 두 가지 발견:
+    1. PowerShell 프로세스는 시작 시 한 번만 dot-source. 파일 수정해도 메모리에 옛 함수 정의 보관.
+    2. WSL repo와 Windows 사본 분리 — repo만 수정하면 실행 코드는 변하지 않음.
+- **Artifacts:**
+  - 본 progress.md (위 Known limitations 항목)
+- **Verification:**
+  - `Get-CimInstance Win32_Process`로 옛 PID(14264, 04-27 기동분) 확인 후 Stop-Process.
+  - `schtasks /Run /TN DiskusageWatchdog`으로 새 프로세스 트리거.
+- **Known limitations:**
+  - 이 시점 워치독은 여전히 옛 코드 실행 중이었음(Windows 사본 미동기화). 5/2에서야 완전 해결.
+
+### 이전 세션들 (요약)
+
+- **VBS 키퍼 제거 → 복원 사이클** (`e522568` → `a8ee4f8`):
+  - 한 번 VBS 내부 keepalive 루프를 제거했다가, 헤드리스 요구로 VBS 래퍼만 단순화해 복원.
+  - 죽음 감지·재시작은 Task Scheduler PT1M Repetition + `IgnoreNew`로 일원화.
+- **command-listener 분리** (`409f2d3`):
+  - 워치독이 죽으면 알릴 자가 없는 문제 해결을 위해 별도 프로세스로 분리. 워치독 부재를 60초 안에 감지 후 알림.
+- **일일 09시 하트비트 제거** (`1f7dc12`):
+  - 사용자 요청으로 노이즈 제거.
+- **HTTP 400 버그 수정** (커밋 `14b11c8 fix: send Telegram messages as UTF-8 JSON, fix nested keyboard array`):
+  - PS5.1 form-encoded body의 emoji 깨짐 → JSON 본문으로 전환.
+  - inline_keyboard ConvertTo-Json 3중 중첩 문제 → 리터럴 JSON 문자열로 회피.
+- **30초 frozen 디바운스 도입**:
+  - 10~15초 짧은 스파이크에 대한 false-positive 알림 항의 후.
+
+---
+
+## Decisions & Rationale (코드만 봐선 모를 정보)
+
+| 결정 | 이유 |
+|---|---|
+| VBS 래퍼 부활 | `-WindowStyle Hidden`만으론 Task Scheduler 컨텍스트에서 창 깜빡임. 사용자 명시 요구 "헤드리스로 못해?". |
+| VBS 내부 keepalive 제거 | 책임 분산이 디버깅을 어렵게 함. 죽음 감지·재시작 책임을 Task Scheduler 한 곳으로 일원화. |
+| 09시 하트비트 제거 | 사용자가 노이즈로 판단함. |
+| 30초 frozen 디바운스 | 짧은 I/O 스파이크에서 알림이 과민하게 발사되는 것을 사용자가 지적. |
+| Telegram body를 JSON으로 | PS5.1 form-encoded에서 emoji 깨짐 → HTTP 400 → 몇 주간 알림이 묵묵히 안 가던 진짜 원인. |
+| inline_keyboard를 리터럴 문자열로 | PS5.1 ConvertTo-Json이 inline_keyboard를 3중 중첩 배열로 만들어 Telegram이 거부. |
+| VM down 알림에도 frozen과 동일 3-버튼 | 사용자 명시 요구 + UX 일관성. |
+| `_TelegramLog`는 첫 시도 성공만 silent | 스킵(`[SKIP]`)·재시도 성공(`[OK] sent on retry #N`)·에러(`[ERROR]`)·최종실패(`[FAIL]`)는 모두 기록. 빈 telegram 로그 = "발송 시도 자체가 없음" 또는 "모든 발송이 첫 시도에 성공"을 의미. |
+| memento MCP 완전 제거 | 사용자가 안 씀 + 1.3GB 메모리 회수. |
+
+---
+
+## 작업 가정 (Assumptions)
+
+- **WSL repo ↔ Windows 사본은 수동 동기화.** repo 변경 시 `cp` + 워치독 재시작 둘 다 필요.
+- **PowerShell 프로세스는 시작 시 한 번만 dot-source.** 파일 변경 후엔 프로세스 재시작 필수.
+- **Task Scheduler의 `IgnoreNew` 정책으로 단일 인스턴스 보장.** 1분 트리거 + 살아있으면 무시 = 죽었을 때만 1분 내 부활.
+- **`[EXTERNAL]` 가드는 WSL이 원인 아닌 디스크 압박 식별용.** `PhysicalDisk` 높지만 `VHD I/O` 낮으면 = Windows 측 다른 프로세스 → WSL 액션 억제.
+- **WSL 응답성 테스트는 비싼 작업이라 조건부 실행.** VHD I/O ≥ 50MB/s OR DiskPct ≥ 50% OR 이미 frozen일 때만. 부작용으로 죽은 WSL을 깨우는 효과도 있음.
+- **이중 정리 경로의 중복 방지는 status 파일로 일원화.** WSL monitor가 자체 정리 중이면 `~/.diskusage/status=cleaning` 기록 → Windows 워치독이 `Get-WslMonitorStatus`로 확인하고 cleanup 트리거 스킵. 양쪽이 동시에 fstrim/journalctl 도는 사고 방지.
+
+---
+
+## 발견한 이상치 / 엣지 케이스
+
+- **04/27 기동된 워치독이 04/30까지 옛 코드로 살아있음.** Task Scheduler PT1M 반복은 기존 인스턴스가 살아있으면 새로 안 띄움 → 코드 갱신 시 자동 적용 안 됨.
+- **WSL 메모리가 비정상 속도로 빠져나감.** 5/2 10:51:13 MEM 3.3GB → 10:51:34 MEM 0.8GB (21초 -2.5GB). 5/3 새벽도 동일 패턴.
+- **WSL 죽음→회복→재죽음 사이클.** 5/3 05:06:30 백업 후 wsl restart 성공 → 05:07:08 즉시 메모리 다시 빠짐 → 05:08:28 재죽음 → 06:47까지 1.5시간 다운.
+- **워치독 자체가 응답 못 한 갭.** 5/3 05:00:13~05:02:03 약 2분간 워치독 로그 없음 (host 디스크 마비로 워치독 자신도 멈춤).
+- **PhysicalDisk 카운터 비현실적 값** (2020%, 4312%). Windows 카운터 누적 큐 깊이 표현 — 사용률 자체는 아니지만 압박 신호로는 유효.
+- **Host 메모리 87.6% 상시 점유.** Total 15.9GB 중 13.9GB used (WSL이 4.1GB 잡은 상태). `autoMemoryReclaim=disabled`로 바꾸면 WSL이 풀로 10GB 잡을 때 host에 6GB만 남는 구조적 한계.
+- **memento MCP 설정이 두 곳에 분산.** `~/.claude/.mcp.json`(프로젝트) + `~/.claude.json`(사용자) 양쪽에 있어 두 번에 걸쳐 정리.
+- **Listener 409 Conflict** (이전 세션). getUpdates 동시 폴링 시 Telegram이 한쪽 강제 종료 → Task Scheduler 단일 인스턴스 정책으로 해결.
+- **백업 자체는 정상 동작.** 5/3 05:00:01~05:06:12 (6분, 59GB → OneDrive). 1.5h 다운타임의 대부분은 백업 후 재시작이 자리잡지 못한 시간.
+
+---
+
+## Memory Leak 점검 결론
+
+- **누수 없음.**
+- 근거:
+  1. OOM kill 0건 (3일치 dmesg/journalctl).
+  2. 어제(5/2) 시간별 평균 vmmemWSL 메모리는 4.87~5.91GB 사이 변동 — 단조증가 아님.
+  3. memento Node 프로세스 FD 26개 (누수 시 수천 개).
+  4. Threads 17개, VmData 1.1GB (V8 정상 범위).
+  5. 커널 Slab 193MB / SUnreclaim 89MB (낮음).
+- **진짜 원인:** 워킹셋 자체가 host RAM 대비 빠듯 + autoMemoryReclaim 폭주.
+- **다음 행동의 축:** "WSL 안에서 뭘 줄일까"가 아니라 "host와의 관계를 어떻게 조정할까".
+
+---
+
+## Confidence Markers (검증 수준)
+
+본 문서의 진술 중 추측이 섞이거나 데이터로 입증 안 된 항목 표시.
+
+### 🟡 일반 지식 + 정황 일치 (직접 입증 안 함)
+
+- **"PowerShell 프로세스는 시작 시 한 번만 dot-source"** — PS의 일반 동작 지식에 정황 증거(코드 갱신 후에도 옛 메시지 도착)가 부합. 메모리 덤프 등으로 직접 입증 안 함.
+- **"Test-WslResponsive(`wsl -e true`)가 죽은 WSL을 깨우는 부작용 가능"** — wsl.exe 동작에 대한 추정. 본 세션에서 직접 검증 안 함.
+- **"PhysicalDisk 카운터의 누적 큐 깊이 표현"** — Windows perfmon 카운터 일반 정의. 본 세션에서 직접 확인 안 함.
+
+### 🟡 분석적 결론 (실험적 입증 미완)
+
+- **"진짜 원인은 워킹셋이 host RAM 대비 빠듯 + autoMemoryReclaim 폭주"** — 누수 0건 + 폭주 패턴은 데이터로 확인됨. 그러나 "이것이 근본 원인"이라는 결론은 `.wslconfig` 변경 후 재현 여부로 검증해야 확정.
+- **"백업 후 재시작이 자리잡지 못한 이유 = autoMemoryReclaim 폭주"** — 5/3 05:06:30 재시작 직후 메모리 빠짐은 로그 사실. 그러나 host 측 행동은 직접 관측 안 함.
+- **"21초간 -2.5GB는 비정상 속도"** — 측정값은 사실. "비정상" 평가는 autoMemoryReclaim의 정상 회수 속도 기준을 모르는 상태에서의 판정.
+- **"4/27 워치독이 옛 코드로 살아있었음"** — 프로세스 시작 시각 + 알림 형식의 정황 증거로 추정. 실행 중인 코드를 직접 dump해서 확인한 것 아님.
+
+### 🔴 단일 데이터 포인트 / 표본 부족
+
+- **"WSL 워킹셋 어제 평균 4.8~5.9GB"** — 5/2 1일치 watchdog 로그만 분석. 평일/주말, 작업 부하 변동 미고려. **`memory=8GB` 캡 권장의 근거가 1일 표본임에 유의.**
+- **"`Scripts Weekly Backup` 매주 월 05:30 동작"** — schtask 정의(트리거)만 확인. 실제 스크립트 내용/로그는 확인 안 함.
+- **"Listener 409 Conflict 해결됨"** — 이전 세션 기록. 본 세션에서 재발 여부 검증 안 함.
+- **"memento 1.3GB 회수가 백업 시 압박 감소로 이어진다"** — 단순 산술 추정. 다음 백업(2026-05-10 05:00)에서 관측 필요.
+
+### ⚠️ 가정 (자동 검증 안 됨)
+
+- **"WSL repo와 Windows 사본은 자동 동기화 없음"** — 현 시점에서 사용자가 동기화 도구를 안 쓰는 것으로 보이지만, 향후 도입 가능성 미확인. 새로 도입되면 본 문서의 "수동 cp 필요" 가정은 무효.
+- **"Send-WatchdogHeartbeat 호출 없음"** — `watchdog.ps1` grep 결과 0. 다른 곳에서 import해 쓰지 않는다는 가정.
+
+---
+
+## Known Issues & Pending
+
+### 사용자 회신 대기 — `.wslconfig` 조정안
+
+검토 완료된 4개 안:
+
+| 방안 | memory= | autoMemoryReclaim | 영향 |
+|---|---|---|---|
+| A. 현재 유지 | 10GB | gradual | 백업·압박 시 WSL kill 계속 |
+| B. memory 축소만 | 8GB | gradual | host 여유 +2GB, kill 빈도 감소 |
+| **C. 둘 다** (추천) | **8GB** | **disabled** | host 여유 +2GB, WSL kill 거의 없음 |
+| D. disabled만 | 10GB | disabled | host 메모리 부족, 페이징 악화. 비권장 |
+| E. dropcache | 10GB | dropcache | 페이지 캐시만 회수, 워킹셋 보호. 중간 절충 |
+
+추천 근거:
+- WSL 워킹셋 어제 평균 4.8~5.9GB → 8GB cap이면 여유 2GB.
+- Host에 8GB 확보 → 13.9GB 점유 → 약 11.9GB로 떨어짐 → 여유 4GB.
+
+### 미합의 사항
+
+- **백업 시간 이동 여부.** 매주 월 05:00(사용자 수면 중) → 깨어있는 시간으로 옮길지. 메리트: 다운타임 시 즉시 반응. 디메리트: 사용 중 백업.
+- **memento 제거 효과 검증.** 1.3GB 회수가 백업 시 압박 감소로 이어지는지는 다음 백업(2026-05-10 05:00)에서 관측 필요.
+- **워치독에 host 측 top-IO 프로세스 캡처 추가** 제안 — 사용자 미응답.
+
+### 기술 부채
+
+- WSL repo와 Windows 사본 동기화가 수동. 자동 sync 스크립트 또는 symlink 검토 필요.
+- 워치독 코드 변경 시 프로세스 재시작이 사람의 기억에 의존. 배포 스크립트화 필요.
+- 텔레그램 발송 성공 케이스도 로그 남기는 옵션 추가 검토 (현재는 빈 로그 = OK 인지 미발송인지 구분 불가).

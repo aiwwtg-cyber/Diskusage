@@ -53,7 +53,9 @@ function Get-PhysicalDiskPercent {
 
 function Get-VmmemMemoryMB {
     try {
-        $proc = Get-Process -Name "vmmem*" -ErrorAction SilentlyContinue | Select-Object -First 1
+        # 정확 일치 필수: 다른 HCS VM(Claude Cowork 샌드박스 등)이 plain "vmmem"으로 떠서
+        # 와일드카드로 잡으면 그쪽 워킹셋을 WSL 메모리로 오인함 (2026-07-09 오탐 사태)
+        $proc = Get-Process -Name "vmmemWSL" -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($proc) {
             return [math]::Round($proc.WorkingSet64 / 1MB, 2)
         }
