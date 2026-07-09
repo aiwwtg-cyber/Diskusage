@@ -5,7 +5,7 @@
 **Phase:** 안정성 보강 (헤드리스 + 자동 부활 + 알림 신뢰성)
 **Last completed:** vmmem 와일드카드 오탐 수정 — WSL VM down 플래핑 해소 (2026-07-10)
 **Next up:** `.wslconfig` 조정안 결정 (`memory=8GB` + `autoMemoryReclaim=disabled` 적용 여부) — 사용자 회신 대기
-**Latest commit:** `58f26b6 feat: add action buttons to WSL VM down alert` (vmmem 수정 커밋 대기 중)
+**Latest commit:** `467acb4 fix: match vmmemWSL exactly to avoid misreading other HCS VMs (Cowork sandbox)`
 
 ---
 
