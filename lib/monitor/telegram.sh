@@ -41,3 +41,16 @@ notify_monitor_stopped() {
     _send_telegram "🛑 <b>Diskusage Monitor Stopped</b>
 $(date '+%Y-%m-%d %H:%M:%S')"
 }
+
+# /init이 계속 커지면 OOM killer가 이를 죽이고 WSL 소켓 계층이 붕괴한다.
+# 2026-07-22 사고에서는 80초 만에 3.8GB가 불어나 두 번 다 손쓸 틈이 없었다.
+notify_init_bloat() {
+    local rss_mb="$1" threshold_mb="$2"
+    _send_telegram "⚠️ <b>WSL /init 메모리 폭주 감지</b>
+$(date '+%Y-%m-%d %H:%M:%S')
+현재 <b>${rss_mb}MB</b> (임계치 ${threshold_mb}MB)
+
+OOM 면제가 걸려 있어 WSL이 죽지는 않지만,
+다른 프로세스가 대신 종료될 수 있습니다.
+호스트(Windows) 디스크 부하를 확인하세요."
+}

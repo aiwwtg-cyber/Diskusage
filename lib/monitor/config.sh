@@ -22,6 +22,9 @@ load_config() {
     DANGER_DURATION=60
     CRITICAL_DURATION=120
     WSL_EXEC_TIMEOUT=10
+    # /init 폭주 경고 임계치. 평시 관측 데이터가 없어 추정값이다
+    # (2026-07-22 OOM 시점 5.6GB / WSL 총 9.7GB). 실측 축적 후 조정할 것.
+    INIT_RSS_WARN_MB=2500
 
     local config_file="$DISKUSAGE_HOME/config/config.conf"
     if [[ -f "$config_file" ]]; then
@@ -31,7 +34,7 @@ load_config() {
             [WARN_THRESHOLD]=1 [ALERT_THRESHOLD]=1 [DANGER_THRESHOLD]=1 [CRITICAL_THRESHOLD]=1
             [IO_BASELINE_MBPS]=1 [WARN_DURATION]=1 [ALERT_DURATION]=1
             [DANGER_DURATION]=1 [CRITICAL_DURATION]=1 [WSL_EXEC_TIMEOUT]=1
-            [LOG_RETENTION_DAYS]=1 [MAX_LOG_SIZE_MB]=1
+            [LOG_RETENTION_DAYS]=1 [MAX_LOG_SIZE_MB]=1 [INIT_RSS_WARN_MB]=1
         )
         while IFS='=' read -r key value; do
             [[ "$key" =~ ^#.*$ || -z "$key" ]] && continue

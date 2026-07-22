@@ -2,10 +2,10 @@
 
 ## Current Status
 
-**Phase:** 안정성 보강 (헤드리스 + 자동 부활 + 알림 신뢰성)
-**Last completed:** vmmem 와일드카드 오탐 수정 — WSL VM down 플래핑 해소 (2026-07-10)
-**Next up:** `.wslconfig` 조정안 결정 (`memory=8GB` + `autoMemoryReclaim=disabled` 적용 여부) — 사용자 회신 대기
-**Latest commit:** `467acb4 fix: match vmmemWSL exactly to avoid misreading other HCS VMs (Cowork sandbox)`
+**Phase:** WSL 커널 계층 방어 (`/init` OOM 자살 차단)
+**Last completed:** `/init` OOM 면제 + 폭주 관측 구현, monitor stop 버그 2건 수정 (2026-07-22)
+**Next up:** 사용자가 `sudo ./install-init-guard.sh` 실행 → Windows에서 `wsl --shutdown` → 재시작 후 V1/V3/V4 검증
+**Latest commit:** `873dcbd docs: update latest commit reference in progress.md` (본 작업 미커밋)
 
 ---
 
@@ -41,6 +41,8 @@
 | `lib/monitor/cleanup.sh` | `run_cleanup <level>` 함수. journalctl/tmp/fstrim 단계적 실행. |
 | `lib/monitor/config.sh` | `load_config` — 기본값 + `~/.diskusage/config/config.conf` 병합. |
 | `lib/monitor/diskstats.sh`, `logger.sh`, `telegram.sh` | I/O 계산 / 일별 로그 + 7일 로테이션 / curl 송신. |
+| `lib/monitor/init-guard.sh` | **WSL `/init` OOM 면제 + RSS 관측** (2026-07-22 신규). `find_wsl_init_pids`(comm=init && uid=0) / `protect_wsl_init [attempts]`(root 전용, `oom_score_adj=-1000`) / `get_wsl_init_rss_mb` / `get_wsl_init_oom_adj`. CLI: `protect\|rss\|pids\|check`. |
+| `install-init-guard.sh` (루트) | systemd 유닛 생성 + `multi-user.target.wants` 심볼릭 링크 직접 생성. **D-Bus가 죽은 상태에서도 동작**하도록 `systemctl enable` 대신 링크를 직접 만든다. sudo 필요. |
 | `~/.diskusage/cleanup_trigger.sh` (setup.sh가 생성) | **Windows 워치독 ↔ WSL 정리 브리지.** `watchdog.ps1`이 `cleanup` (warn) 또는 `cleanup_and_notify` (alert) 액션 시 `Invoke-WslCommand`로 호출. config + cleanup.sh를 source 후 `run_cleanup $LEVEL` 실행. 단, `Get-WslMonitorStatus`가 `cleaning`이면 중복 방지로 스킵. |
 
 ### 위치 2 — Windows 실행 사본 `C:\Users\aiwwt\Diskusage\`
@@ -78,6 +80,28 @@ WSL repo와 **별개 사본**. 실제 워치독·리스너가 이 경로에서 �
 ---
 
 ## Work Log
+
+### 2026-07-22 — `/init` OOM 자살로 인한 WSL 소켓 계층 붕괴 규명 + 방어
+
+- **What was done:** 하루 2회(07:40, 11:40) 발생한 `Wsl/Service/E_UNEXPECTED` + mssql 재시작 실패의 근본 원인이 **WSL `/init`의 OOM 자살**임을 규명하고, OOM 면제(`oom_score_adj=-1000`)와 `/init` RSS 상시 관측을 구현. 진단 중 발견한 monitor stop 버그 2건도 수정.
+- **Artifacts:** `lib/monitor/init-guard.sh`(신규), `install-init-guard.sh`(신규), `monitor.sh`(INIT 로깅 + stop 버그 2건), `lib/monitor/telegram.sh`(`notify_init_bloat`), `lib/monitor/config.sh`(`INIT_RSS_WARN_MB=2500`), `docs/plans/2026-07-22-init-oom-guard.md`
+- **Verification:** `bash -n` 5/5 PASS · init-guard 4개 서브커맨드 정상 · 비root protect 거부 메시지 정상 · monitor 로그 `INIT:<N>MB` 100% 적재 · stop 버그 수정 후 루프 정상 종료(수정 전엔 SIGTERM 무시) · 4.4시간짜리 고아 monitor(PID 1420) 제거 후 단일 인스턴스 확인. **V1(oom_score_adj=-1000) / V3(bind 복구) / V4(mssql healthy)는 WSL 재시작 전이라 미검증.**
+- **Known limitations:** `install-init-guard.sh` 미실행(sudo 비밀번호 필요, 사용자 직접 실행) · 임계치 2500MB는 추정값(평시 `/init` RSS 관측 데이터 없음) · `__vm_enough_memory` 커널 사전 경고 감시 미구현 · 방아쇠(호스트 디스크 점유 프로세스) 미식별.
+
+#### 인과 사슬 (두 사고 모두 동일하게 재현)
+
+| | 1차 | 2차 |
+|---|---|---|
+| 폭증 시작 | 07:39:16 · 3.3GB | 11:39:35 · 3.5GB |
+| `[EXTERNAL]` 동반 | 07:40:20 (+1.2GB) | 11:40:22 (+0.9GB) |
+| 정점 | 07:40:36 · **7.0GB** | 11:40:58 · **7.3GB** |
+| 소요 | **80초** | **83초** |
+| OOM 희생자 | PID 220 `init` anon-rss 4.9GB | PID 219 `init` anon-rss 5.6GB |
+| `/init` total-vm | 12,586,212kB | 12,586,212kB (완전 동일) |
+
+호스트 디스크 포화(`[EXTERNAL]`) → WSL의 9p·VHD I/O 블록 → `/init` 요청 버퍼가 힙에 무제한 축적(초당 47MB) → global OOM → killer가 시스템 최대 프로세스인 `/init` 선택 → **`bind()`가 AF_UNIX·AF_VSOCK·AF_NETLINK 전 계열에서 `ENOSYS(38)`** → 세션 생성 불가(E_UNEXPECTED) · containerd shim 불가(mssql 재시작 실패) · D-Bus 불가 · udev 불가.
+
+**구조적 결함:** 커널은 PID 1만 OOM에서 보호한다. WSL2에서 소켓·interop을 담당하는 `/init`은 별도 PID(219/220)라 보호받지 못해, 자기가 최대 프로세스가 되는 순간 자기가 죽고 시스템 전체를 무너뜨린다.
 
 ### 2026-07-10 — vmmem 와일드카드 오탐 수정 (WSL VM down 플래핑 해소)
 
@@ -250,9 +274,13 @@ WSL repo와 **별개 사본**. 실제 워치독·리스너가 이 경로에서 �
 
 ## Known Issues & Pending
 
-### 사용자 회신 대기 — `.wslconfig` 조정안
+### ✅ 결론 — `.wslconfig` 조정안 (2026-07-22 결정: **A. 현행 유지**)
 
-검토 완료된 4개 안:
+> **판단 근거가 바뀌었다.** 2026-07-22 진단에서 장애 원인이 "워킹셋이 host RAM 대비 빠듯함"이 아니라 **`/init`의 80초 폭주(초당 47MB)** 로 밝혀졌다. 폭주 속도가 이 정도면 캡이 8GB든 12GB든 결과가 같고, 오히려 8GB로 줄이면 OOM이 더 빨리 온다. 아래 C안 추천은 **근거가 무효화되었다.** 사용자 결정으로 `memory=10GB` + `autoMemoryReclaim=gradual` 현행 유지.
+>
+> 단, `autoMemoryReclaim`은 메모리 *크기*가 아니라 *회수 동작*이므로 `/init` 폭주와의 상관은 여전히 미검증이다. 재시작 후 `/init` RSS 실측이 쌓이면 재평가할 것.
+
+과거 검토안 (기록 보존용):
 
 | 방안 | memory= | autoMemoryReclaim | 영향 |
 |---|---|---|---|

@@ -11,6 +11,7 @@ source "$SCRIPT_DIR/lib/monitor/diskstats.sh"
 source "$SCRIPT_DIR/lib/monitor/logger.sh"
 source "$SCRIPT_DIR/lib/monitor/cleanup.sh"
 source "$SCRIPT_DIR/lib/monitor/telegram.sh"
+source "$SCRIPT_DIR/lib/monitor/init-guard.sh"
 
 load_config
 load_telegram_config
@@ -71,7 +72,11 @@ do_stop() {
     local pid
     pid=$(cat "$PID_FILE")
     echo "stopping monitor (pid: $pid)..."
-    kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+    # 그룹 kill이 성공해도 대상 PID가 다른 그룹에 있으면 살아남는다.
+    # 단축평가(||)로 두면 그룹 kill 성공 시 개별 kill을 건너뛰어 고아가 남는다.
+    # 2026-07-22: 이 경로로 4.4시간짜리 고아 monitor가 중복 실행 중이었음.
+    kill -- "-$pid" 2>/dev/null || true
+    kill "$pid" 2>/dev/null || true
     rm -f "$PID_FILE" "$STATUS_FILE"
     echo "monitor stopped"
 }
@@ -108,7 +113,10 @@ do_report() {
 }
 
 _monitor_loop() {
-    trap '_on_exit' EXIT TERM INT
+    # trap을 걸면 시그널의 기본 동작(종료)이 사라진다. 핸들러에서 명시적으로
+    # exit하지 않으면 SIGTERM을 받고도 루프가 계속 돌아 고아가 남는다.
+    # 2026-07-22: 이 누락으로 do_stop이 "stopped"를 출력해도 실제로는 죽지 않았음.
+    trap '_on_exit; exit' EXIT TERM INT
     _MONITOR_START_EPOCH=$(date +%s)
     set_status "idle"
     rotate_logs
@@ -117,6 +125,7 @@ _monitor_loop() {
     local prev_rd=0 prev_wr=0
     local first_read=true
     local prev_level="normal"
+    local init_warned=false
 
     while true; do
         local stats
@@ -143,15 +152,32 @@ _monitor_loop() {
         local mem_info
         mem_info=$(free -m | awk '/Mem:/{printf "%dM/%dM", $3, $2} /Swap:/{printf " SWAP:%dM/%dM", $3, $2}')
 
+        # WSL 최상위 /init의 RSS. 폭주하면 OOM killer가 이를 죽이고 소켓 계층이
+        # 붕괴하므로(2026-07-22 2회 발생), 사고 후 부검이 불가능하다. 상시 기록만이
+        # 증거를 남기는 유일한 방법이다.
+        local init_rss
+        init_rss=$(get_wsl_init_rss_mb)
+
         # 메모리 Top 프로세스 추적 (warn 이상 또는 메모리 85%+)
         local mem_used mem_total mem_pct top_procs=""
         read -r mem_used mem_total <<< "$(free -m | awk '/Mem:/{print $3, $2}')"
         mem_pct=$(( mem_used * 100 / mem_total ))
         if [[ "$level" != "normal" ]] || (( mem_pct >= 85 )); then
             top_procs=$(ps aux --sort=-%mem | awk 'NR>1 && NR<=6{printf " %s(%dMB)", $11, $6/1024}')
-            log_entry "VHD_IO:${total_kbps}KB/s MEM:${mem_info} LEVEL:${level} TOP:${top_procs}"
+            log_entry "VHD_IO:${total_kbps}KB/s MEM:${mem_info} INIT:${init_rss}MB LEVEL:${level} TOP:${top_procs}"
         else
-            log_entry "VHD_IO:${total_kbps}KB/s MEM:${mem_info} LEVEL:${level}"
+            log_entry "VHD_IO:${total_kbps}KB/s MEM:${mem_info} INIT:${init_rss}MB LEVEL:${level}"
+        fi
+
+        # 임계치의 80% 아래로 내려가야 재무장한다 (경계선 플래핑 방지)
+        if (( init_rss >= INIT_RSS_WARN_MB )); then
+            if [[ "$init_warned" == false ]]; then
+                log_entry "INIT_BLOAT: /init RSS ${init_rss}MB >= ${INIT_RSS_WARN_MB}MB"
+                notify_init_bloat "$init_rss" "$INIT_RSS_WARN_MB"
+                init_warned=true
+            fi
+        elif (( init_rss < INIT_RSS_WARN_MB * 80 / 100 )); then
+            init_warned=false
         fi
 
         if [[ "$level" != "normal" ]]; then
@@ -183,6 +209,9 @@ _monitor_loop() {
 }
 
 _on_exit() {
+    # TERM 핸들러의 exit가 EXIT trap을 다시 부르므로 재진입을 막는다.
+    [[ -n "${_MONITOR_EXITING:-}" ]] && return
+    _MONITOR_EXITING=1
     # 디바운스: 60초 이상 살아있었을 때만 Stopped 알림 (짧은 사이클 스팸 방지)
     local now
     now=$(date +%s)
