@@ -5,7 +5,7 @@
 **Phase:** WSL 커널 계층 방어 (루트 ns 배관 init OOM 차단 + 이중 감지망)
 **Last completed:** OOM 희생자가 **루트 네임스페이스의 배관 init**임을 규명, `wsl --system` 경유 보호 + 숨은 메모리(HID)·커널 경고 감시 가동 (2026-07-22 2차)
 **Next up:** ① OneDrive 백업 부하 결정(7.1GB/일 + 68GB/주 → D:\ 이전 여부) ② 다음 `[EXTERNAL]` 폭풍에서 HID 곡선·ROOTNS_GUARD 동작 관측 ③ 다음 부팅에서 serveronoff 문맥의 interop 동작 확인
-**Latest commit:** `32ed8b7` (2차 재설계분 미커밋)
+**Latest commit:** `6bc2a92 fix: reach root-namespace plumbing init via wsl --system, harden HID detection`
 
 ---
 
