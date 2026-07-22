@@ -4,7 +4,7 @@
 
 **Phase:** WSL 커널 계층 방어 (루트 ns 배관 init OOM 차단 + 이중 감지망)
 **Last completed:** OOM 희생자가 **루트 네임스페이스의 배관 init**임을 규명, `wsl --system` 경유 보호 + 숨은 메모리(HID)·커널 경고 감시 가동 (2026-07-22 2차)
-**Next up:** ① OneDrive 백업 부하 결정(7.1GB/일 + 68GB/주 → D:\ 이전 여부) ② 다음 `[EXTERNAL]` 폭풍에서 HID 곡선·ROOTNS_GUARD 동작 관측 ③ 다음 부팅에서 serveronoff 문맥의 interop 동작 확인
+**Next up:** ① 다음 `[EXTERNAL]` 폭풍에서 HID 곡선·ROOTNS_GUARD 동작 관측 ② 다음 부팅에서 serveronoff 문맥의 interop 동작 확인 ③ 배관 init 생성 조건 규명(HID 로그 축적 후)
 **Latest commit:** `6bc2a92 fix: reach root-namespace plumbing init via wsl --system, harden HID detection`
 
 ---
@@ -214,6 +214,7 @@ WSL repo와 **별개 사본**. 실제 워치독·리스너가 이 경로에서 �
 | VM down 알림에도 frozen과 동일 3-버튼 | 사용자 명시 요구 + UX 일관성. |
 | `_TelegramLog`는 첫 시도 성공만 silent | 스킵(`[SKIP]`)·재시도 성공(`[OK] sent on retry #N`)·에러(`[ERROR]`)·최종실패(`[FAIL]`)는 모두 기록. 빈 telegram 로그 = "발송 시도 자체가 없음" 또는 "모든 발송이 첫 시도에 성공"을 의미. |
 | memento MCP 완전 제거 | 사용자가 안 씀 + 1.3GB 메모리 회수. |
+| **OneDrive 백업 현행 유지** (2026-07-22) | 매일 7.1GB(suho001) + 매주 68GB(VHDX) 업로드가 `[EXTERNAL]` 디스크 정체의 유력 원인이나, **사용자가 OneDrive 백업 자체를 업무상 필수로 판단**해 D:\ 이전안을 기각. 따라서 방아쇠는 상시 존재한다는 전제로 방어(루트 ns OOM 면제 + 이중 감지망)에 의존한다. |
 
 ---
 
