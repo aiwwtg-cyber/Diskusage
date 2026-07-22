@@ -5,7 +5,7 @@
 **Phase:** WSL 커널 계층 방어 (`/init` OOM 자살 차단)
 **Last completed:** `/init` OOM 면제 + 폭주 관측 구현, monitor stop 버그 2건 수정 (2026-07-22)
 **Next up:** 사용자가 `sudo ./install-init-guard.sh` 실행 → Windows에서 `wsl --shutdown` → 재시작 후 V1/V3/V4 검증
-**Latest commit:** `873dcbd docs: update latest commit reference in progress.md` (본 작업 미커밋)
+**Latest commit:** `3f3d13b fix: guard WSL /init from OOM kill and fix monitor stop leaking orphans`
 
 ---
 
