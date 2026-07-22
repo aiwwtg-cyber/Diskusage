@@ -67,6 +67,46 @@ get_wsl_init_oom_adj() {
     done
 }
 
+# ── 루트 네임스페이스 (2026-07-22 2차 규명) ────────────────────────────────
+# OOM 희생자였던 12GB init(전역 PID 219/220)은 Ubuntu ns 밖 — 여기 함수들로는
+# 보이지 않는다. 유일한 접근로는 `wsl.exe --system`: 시스템 배포판이 루트
+# PID ns를 공유하므로(커널 스레드 가시성으로 확인) 그 안에서 전역 /proc에
+# 쓸 수 있다. 인증 불필요(-u root는 WSL 기본 권한 모델).
+
+WSL_EXE="${WSL_EXE:-/mnt/c/Windows/System32/wsl.exe}"
+ROOTNS_SCAN_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/rootns-scan.sh"
+
+# 루트 ns의 comm=init 목록을 "<pid> vsz=<kB> rss=<kB> adj=<N>" 형식으로 출력.
+# mode=protect면 VmSize 4GB 이상(=12GB 예약 배관 init)에 -1000을 먼저 기록.
+# 호스트 정체 중엔 wsl.exe 자체가 걸릴 수 있어 timeout 필수 — 보호는 평시에
+# 미리 걸어두는 것이 요점이다.
+rootns_init_guard() {
+    local mode="${1:-protect}"
+    [[ -x "$WSL_EXE" && -f "$ROOTNS_SCAN_SCRIPT" ]] || return 1
+    (cd /mnt/c 2>/dev/null || cd /
+     timeout 20 "$WSL_EXE" --system -u root sh -s "$mode" < "$ROOTNS_SCAN_SCRIPT" 2>/dev/null
+    ) | tr -d '\0\r'
+}
+
+# 루트 ns 익명 메모리 추정치(MB) = 전역 AnonPages − Ubuntu ns 프로세스 합.
+# 희생자 init의 비대가 그대로 이 값으로 드러난다 (평시 ~26MB, 사고 시 5.6GB).
+# wsl.exe 호출 없이 /proc만 읽으므로 매 주기 돌려도 된다.
+#
+# 경합 주의(2026-07-22 가짜 경보 3건의 원인):
+# - awk에 파일 목록을 직접 주면 스윕 도중 프로세스가 죽는 순간 mawk가 즉사해
+#   합계가 조기 중단 → 차액 수 GB가 "숨은 메모리"로 둔갑한다.
+#   cat은 사라진 파일을 건너뛰고 계속 가므로 cat 경유로 합산한다.
+# - 스윕을 먼저, meminfo를 나중에 읽는다. 그러면 스윕 중 종료된 프로세스는
+#   양쪽 모두에서 빠져 과대평가(가짜 경보) 대신 과소평가(음수→0 클램프)가 된다.
+get_hidden_anon_mb() {
+    local total seen diff
+    seen=$(cat /proc/[0-9]*/status 2>/dev/null | awk '/^RssAnon:/{s+=$2} END{print s+0}')
+    total=$(awk '/^AnonPages:/{print $2}' /proc/meminfo)
+    diff=$(( (total - seen) / 1024 ))
+    (( diff < 0 )) && diff=0
+    echo "$diff"
+}
+
 # 라이브러리로 source될 때는 아래를 실행하지 않는다.
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     case "${1:-protect}" in
@@ -74,6 +114,8 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         rss)     echo "$(get_wsl_init_rss_mb)MB" ;;
         pids)    find_wsl_init_pids ;;
         check)   get_wsl_init_oom_adj ;;
-        *)       echo "Usage: $0 {protect [attempts]|rss|pids|check}" >&2; exit 1 ;;
+        hidden)  echo "$(get_hidden_anon_mb)MB" ;;
+        rootns)  rootns_init_guard "${2:-scan}" ;;
+        *)       echo "Usage: $0 {protect [attempts]|rss|pids|check|hidden|rootns [scan|protect]}" >&2; exit 1 ;;
     esac
 fi

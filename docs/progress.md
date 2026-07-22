@@ -2,10 +2,10 @@
 
 ## Current Status
 
-**Phase:** WSL 커널 계층 방어 (`/init` OOM 자살 차단)
-**Last completed:** `/init` OOM 면제 + 폭주 관측 구현, monitor stop 버그 2건 수정 (2026-07-22)
-**Next up:** 사용자가 `sudo ./install-init-guard.sh` 실행 → Windows에서 `wsl --shutdown` → 재시작 후 V1/V3/V4 검증
-**Latest commit:** `3f3d13b fix: guard WSL /init from OOM kill and fix monitor stop leaking orphans`
+**Phase:** WSL 커널 계층 방어 (루트 ns 배관 init OOM 차단 + 이중 감지망)
+**Last completed:** OOM 희생자가 **루트 네임스페이스의 배관 init**임을 규명, `wsl --system` 경유 보호 + 숨은 메모리(HID)·커널 경고 감시 가동 (2026-07-22 2차)
+**Next up:** ① OneDrive 백업 부하 결정(7.1GB/일 + 68GB/주 → D:\ 이전 여부) ② 다음 `[EXTERNAL]` 폭풍에서 HID 곡선·ROOTNS_GUARD 동작 관측 ③ 다음 부팅에서 serveronoff 문맥의 interop 동작 확인
+**Latest commit:** `32ed8b7` (2차 재설계분 미커밋)
 
 ---
 
@@ -41,8 +41,9 @@
 | `lib/monitor/cleanup.sh` | `run_cleanup <level>` 함수. journalctl/tmp/fstrim 단계적 실행. |
 | `lib/monitor/config.sh` | `load_config` — 기본값 + `~/.diskusage/config/config.conf` 병합. |
 | `lib/monitor/diskstats.sh`, `logger.sh`, `telegram.sh` | I/O 계산 / 일별 로그 + 7일 로테이션 / curl 송신. |
-| `lib/monitor/init-guard.sh` | **WSL `/init` OOM 면제 + RSS 관측** (2026-07-22 신규). `find_wsl_init_pids`(comm=init && uid=0) / `protect_wsl_init [attempts]`(root 전용, `oom_score_adj=-1000`) / `get_wsl_init_rss_mb` / `get_wsl_init_oom_adj`. CLI: `protect\|rss\|pids\|check`. |
-| `install-init-guard.sh` (루트) | systemd 유닛 생성 + `multi-user.target.wants` 심볼릭 링크 직접 생성. **D-Bus가 죽은 상태에서도 동작**하도록 `systemctl enable` 대신 링크를 직접 만든다. sudo 필요. |
+| `lib/monitor/init-guard.sh` | **WSL init OOM 면제 + 메모리 관측** (2026-07-22). Ubuntu ns: `find_wsl_init_pids` / `protect_wsl_init`(root 전용). **루트 ns**: `rootns_init_guard(mode)` — `wsl.exe --system -u root sh -s < rootns-scan.sh`로 전역 /proc 접근. `get_hidden_anon_mb` — 전역 AnonPages − Ubuntu RssAnon 합(배관 init 비대 게이지, 평시 ~26MB). CLI: `protect\|rss\|pids\|check\|hidden\|rootns`. |
+| `lib/monitor/rootns-scan.sh` | 루트 ns에서 stdin 주입 실행되는 POSIX sh 스크립트. comm=init 나열, protect 모드 시 **VmSize ≥ 4GB init에만** adj=-1000. |
+| `install-init-guard.sh` (루트) | systemd 유닛 생성 + wants 심볼릭 링크 직접 생성(D-Bus 사망 시에도 동작). 가시 init(plan9) 보호용. sudo 필요, 2026-07-22 설치 완료. |
 | `~/.diskusage/cleanup_trigger.sh` (setup.sh가 생성) | **Windows 워치독 ↔ WSL 정리 브리지.** `watchdog.ps1`이 `cleanup` (warn) 또는 `cleanup_and_notify` (alert) 액션 시 `Invoke-WslCommand`로 호출. config + cleanup.sh를 source 후 `run_cleanup $LEVEL` 실행. 단, `Get-WslMonitorStatus`가 `cleaning`이면 중복 방지로 스킵. |
 
 ### 위치 2 — Windows 실행 사본 `C:\Users\aiwwt\Diskusage\`
@@ -74,14 +75,28 @@ WSL repo와 **별개 사본**. 실제 워치독·리스너가 이 경로에서 �
 
 | 작업명 | 트리거 | 동작 |
 |---|---|---|
-| `WSL Weekly VHDX Backup` | 매주 월 05:00 | `wsl --shutdown` → `wsl --export Ubuntu <OneDrive>\광장주류\백업\ubuntu_*.vhdx --vhd` → 최신 3개 보존 → `wsl -d Ubuntu -e true` |
+| `WSL Weekly VHDX Backup` | 매주 **일** 05:00 (구기록 "월"은 오기 — VHDX 생성일 06-28·07-12·07-19 모두 일요일, 매주 일 05:0x FROZEN/VM_DOWN과 정합) | `wsl --shutdown` → `wsl --export Ubuntu <OneDrive>\광장주류\백업\ubuntu_*.vhdx --vhd` (68GB) → 최신 3개 보존 → `wsl -d Ubuntu -e true` |
 | `Scripts Weekly Backup` | 매주 월 05:30 | `C:\Users\aiwwt\Scripts\Scripts-Backup\scripts-backup.ps1` 실행 |
 
 ---
 
 ## Work Log
 
-### 2026-07-22 — `/init` OOM 자살로 인한 WSL 소켓 계층 붕괴 규명 + 방어
+### 2026-07-22 (3차) — HID 측정 경합으로 인한 가짜 경보 수정
+
+- **What was done:** 가동 40분 만에 발생한 HIDDEN_BLOAT 가짜 경보 4건(3.1GB대)의 원인을 규명·수정. `awk`에 /proc 파일 목록을 직접 주면 스윕 도중 프로세스가 죽는 순간 mawk가 즉사해 합계가 조기 중단되는 경합이었다(HID 시계열은 내내 25~29MB로 정상). cat 경유 합산 + 스윕→meminfo 순서 반전(과대평가→과소평가로 방향 전환) + 3주기 연속 확인 + 30분 알림 쿨다운.
+- **Artifacts:** `lib/monitor/init-guard.sh`(`get_hidden_anon_mb`), `monitor.sh`(HIDDEN_BLOAT 판정부), `docs/plans/2026-07-22-init-oom-guard.md`(3차 수정 절)
+- **Verification:** 생멸 폭풍(sleep 0.01×2000) 아래 300회 대조 — 옛 구현 스파이크 **32/300회, 최대 3178MB**(실경보 3149MB와 동일 규모, 버그 재현 확정) vs 새 구현 **0/300회, 최대 32MB**. 수정판 가동 후 HID 29MB 안정, 추가 경보 0건.
+- **Known limitations:** 신규 프로세스가 스윕 후 meminfo 전에 대량 할당하면 잔여 과대평가 가능(수 MB 수준, 3주기 확인이 흡수). 30분 쿨다운은 지속 폭주 시 재알림 간격의 하한.
+
+### 2026-07-22 (2차) — 진범은 루트 네임스페이스: `wsl --system` 경유 보호 + 이중 감지망 가동
+
+- **What was done:** 재시작 후 검증에서 1차 가정이 붕괴 — OOM 희생자(12GB init)는 **Ubuntu ns 밖, 루트 네임스페이스의 WSL 배관 프로세스**였다(OOM 덤프의 pid 176=DebugShell vs Ubuntu의 pid 176=tailscaled로 입증). `wsl.exe --system`이 루트 ns를 공유함을 확인(커널 스레드 가시)하고, ① 60초 주기 루트 ns 보호 재적용, ② 숨은 익명 메모리(HID) 상시 관측+1500MB 경고, ③ 커널 `__vm_enough_memory` 선행 신호 감시를 monitor에 탑재. 방아쇠는 **OneDrive 백업 업로드(매일 7.1GB + 매주 68GB VHDX) + 호스트 RAM 96%**로 압축.
+- **Artifacts:** `lib/monitor/rootns-scan.sh`(신규), `lib/monitor/init-guard.sh`(`rootns_init_guard`/`get_hidden_anon_mb`), `monitor.sh`(HID·KERNEL_VM_PRESSURE·ROOTNS_GUARD), `lib/monitor/config.sh`(`HIDDEN_ANON_WARN_MB=1500`/`ROOTNS_GUARD_INTERVAL=60`), `lib/monitor/telegram.sh`(`notify_init_vm_pressure`), `docs/plans/2026-07-22-init-oom-guard.md`(2차 재설계 절)
+- **Verification:** bind() AF_UNIX·AF_VSOCK 복구 PASS · mssql_suho001 healthy 자동 기동 PASS · ns 매핑 검증 PASS(Ubuntu 7 = 전역 27, adj=-1000 일치) · `HID:` 필드 연속 적재 PASS(평시 21~30MB) · 문법 4/4 · rootns scan 2개 init 반환 · 구코드 monitor(serveronoff 기동분) 새 stop으로 정상 종료. **배관 init 보호는 대기 상태** — 이번 부팅엔 미생성(숨은 anon 26MB로 방증), 생성 시 60초 내 자동 적용.
+- **Known limitations:** 배관 init 생성 조건 미규명(이전 두 부팅=wsl -e 기동 시 존재, 터미널 기동인 이번엔 부재) · wsl.exe 호출이 분당 1회 루프를 최대 20초 지연 가능 · serveronoff 문맥 interop은 다음 부팅에서 확정(cron의 powershell.exe 백업 성공이 방증) · OneDrive 부하는 권고만(사용자 결정 대기).
+
+### 2026-07-22 (1차) — `/init` OOM 자살로 인한 WSL 소켓 계층 붕괴 규명 + 방어
 
 - **What was done:** 하루 2회(07:40, 11:40) 발생한 `Wsl/Service/E_UNEXPECTED` + mssql 재시작 실패의 근본 원인이 **WSL `/init`의 OOM 자살**임을 규명하고, OOM 면제(`oom_score_adj=-1000`)와 `/init` RSS 상시 관측을 구현. 진단 중 발견한 monitor stop 버그 2건도 수정.
 - **Artifacts:** `lib/monitor/init-guard.sh`(신규), `install-init-guard.sh`(신규), `monitor.sh`(INIT 로깅 + stop 버그 2건), `lib/monitor/telegram.sh`(`notify_init_bloat`), `lib/monitor/config.sh`(`INIT_RSS_WARN_MB=2500`), `docs/plans/2026-07-22-init-oom-guard.md`
