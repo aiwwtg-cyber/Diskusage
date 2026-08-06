@@ -5,7 +5,7 @@
 **Phase:** 알림 정밀도 확보 (스팸 제거 + 압박 기반 판정) → 다음은 루트 ns 접근 재조사
 **Last completed:** 커널경고 알림의 정밀도가 **0%**(8일 121건 감지 / 실사건 0건)임을 규명하고 압박 기반 판정으로 재설계 (2026-08-06)
 **Next up:** ① **`wsl --system`이 루트 ns가 아님이 확증됨 → `ROOTNS_GUARD`가 헛돌고 있다. 진짜 루트 ns 접근 가능성 재조사** ② HID 이중계상 해소 방안(현재 상시 `n/a`) ③ 다음 압박 사건에서 `notify_memory_pressure` 실수신 확인
-**Latest commit:** `6bc2a92 fix: reach root-namespace plumbing init via wsl --system, harden HID detection`
+**Latest commit:** `2dfdeaf fix: replace zero-precision kernel-warning alert with pressure detection`
 
 > ⚠️ **2026-08-06 정정:** 아래 2026-07-22 2차 기록의 핵심 전제 — "`wsl.exe --system`이 루트 PID ns를 공유한다" — 는 **틀렸다.** ns inode 실측으로 확인: Ubuntu `pid:[4026532223]` vs system `pid:[4026532211]` — 서로 다르고 둘 다 루트가 아니다(루트라면 `pid2=kthreadd`여야 하나 실제로는 `systemd`). `dmesg`가 지목하는 배관 init(전역 pid 222)은 **양쪽 ns 어디에서도 보이지 않는다.** 따라서 `ROOTNS_GUARD`의 OOM 면제는 엉뚱한 프로세스(pid 22, rss 1.8MB)에 적용되고 있으며 **실효가 없다.**
 
