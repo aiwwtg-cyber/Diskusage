@@ -125,10 +125,10 @@ _monitor_loop() {
     local prev_rd=0 prev_wr=0
     local first_read=true
     local prev_level="normal"
-    local hidden_warned=false hidden_high_streak=0 hidden_last_alert=0
+    local pressure_warned=false pressure_streak=0 pressure_last_alert=0
     local last_rootns=0 rootns_big_seen=false
-    # 부팅 이전부터 쌓인 커널 경고에는 알리지 않도록 현재 카운트로 초기화
-    local vmw_prev vmw_last_alert=0
+    # 부팅 이전부터 쌓인 커널 경고는 창 밀도에 넣지 않도록 현재 카운트로 초기화
+    local vmw_prev vmw_win_start=$_MONITOR_START_EPOCH vmw_win_n=0 vmw_burst=0
     vmw_prev=$(dmesg 2>/dev/null | grep -c '__vm_enough_memory')
 
     while true; do
@@ -158,8 +158,11 @@ _monitor_loop() {
 
         # 루트 ns 숨은 익명 메모리 = OOM 희생자였던 배관 init의 비대 게이지.
         # 사고 시 프로세스가 소멸해 부검이 불가능하므로 상시 기록이 유일한 증거다.
-        local hidden_mb
+        # 음수는 측정 불가(RssAnon 이중계상)라 로그에 n/a로 남긴다 — 0으로 적으면
+        # "숨은 메모리 없음"과 구분되지 않아 눈이 먼 구간을 사후에 찾을 수 없다.
+        local hidden_mb hidden_txt
         hidden_mb=$(get_hidden_anon_mb)
+        if (( hidden_mb < 0 )); then hidden_txt="n/a"; else hidden_txt="${hidden_mb}MB"; fi
 
         # 메모리 Top 프로세스 추적 (warn 이상 또는 메모리 85%+)
         local mem_used mem_total mem_pct top_procs=""
@@ -167,46 +170,63 @@ _monitor_loop() {
         mem_pct=$(( mem_used * 100 / mem_total ))
         if [[ "$level" != "normal" ]] || (( mem_pct >= 85 )); then
             top_procs=$(ps aux --sort=-%mem | awk 'NR>1 && NR<=6{printf " %s(%dMB)", $11, $6/1024}')
-            log_entry "VHD_IO:${total_kbps}KB/s MEM:${mem_info} HID:${hidden_mb}MB LEVEL:${level} TOP:${top_procs}"
+            log_entry "VHD_IO:${total_kbps}KB/s MEM:${mem_info} HID:${hidden_txt} LEVEL:${level} TOP:${top_procs}"
         else
-            log_entry "VHD_IO:${total_kbps}KB/s MEM:${mem_info} HID:${hidden_mb}MB LEVEL:${level}"
+            log_entry "VHD_IO:${total_kbps}KB/s MEM:${mem_info} HID:${hidden_txt} LEVEL:${level}"
         fi
 
         local now_epoch
         now_epoch=$(date +%s)
 
-        # 실제 폭주는 수십 초 이상 지속되므로 3주기 연속일 때만 판정한다
-        # (1주기짜리 스파이크 = 측정 경합 잔재, 2026-07-22 가짜 경보 3건).
-        # 알림은 30분 쿨다운, 임계치의 80% 아래로 내려가야 재무장.
-        if (( hidden_mb >= HIDDEN_ANON_WARN_MB )); then
-            hidden_high_streak=$(( hidden_high_streak + 1 ))
-            if (( hidden_high_streak >= 3 )) && [[ "$hidden_warned" == false ]]; then
-                log_entry "HIDDEN_BLOAT: root-ns anon ${hidden_mb}MB >= ${HIDDEN_ANON_WARN_MB}MB (${hidden_high_streak} cycles)"
-                if (( now_epoch - hidden_last_alert >= 1800 )); then
-                    notify_init_bloat "$hidden_mb" "$HIDDEN_ANON_WARN_MB"
-                    hidden_last_alert=$now_epoch
-                fi
-                hidden_warned=true
-            fi
-        else
-            hidden_high_streak=0
-            if (( hidden_mb < HIDDEN_ANON_WARN_MB * 80 / 100 )); then
-                hidden_warned=false
-            fi
-        fi
-
-        # 커널 __vm_enough_memory = OOM 붕괴의 선행 신호(과거 2건에서 2분~43분 전).
-        # 카운트 감소는 링버퍼 순환이므로 기준점만 갱신한다.
+        # 커널 __vm_enough_memory 추적. 2026-08-06 실측으로 이 신호는 알림 판정에서
+        # 뺐다 — 6일간 119건 발생 시점의 메모리가 최대 77.2%로, 시스템 압박과 무상관이다
+        # (pid 222가 큰 매핑을 시도하다 overcommit 회계에 걸리는 자체 동작).
+        # AND 조건에 두면 경고 없이 오는 진짜 위험(08-06 15:23)을 필터로 걸러 버린다.
+        # 로그와 알림 본문의 참고 정보로만 남긴다. 카운트 감소는 링버퍼 순환이므로
+        # 기준점만 갱신한다.
         local vmw
         vmw=$(dmesg 2>/dev/null | grep -c '__vm_enough_memory')
         if (( vmw > vmw_prev )); then
             log_entry "KERNEL_VM_PRESSURE: __vm_enough_memory ${vmw_prev} -> ${vmw}"
-            if (( now_epoch - vmw_last_alert >= 600 )); then
-                notify_init_vm_pressure "$vmw"
-                vmw_last_alert=$now_epoch
-            fi
+            vmw_win_n=$(( vmw_win_n + (vmw - vmw_prev) ))
         fi
         (( vmw != vmw_prev )) && vmw_prev=$vmw
+        # 60초 창 밀도. 창이 만료되면 리셋한다.
+        if (( now_epoch - vmw_win_start >= 60 )); then
+            vmw_win_start=$now_epoch
+            vmw_burst=$vmw_win_n
+            vmw_win_n=0
+        fi
+
+        # 메모리 압박 판정 (2026-08-06 재설계).
+        # 조건: 메모리 임계 초과 AND (I/O 폭주 OR 숨은 메모리 비대).
+        # 실제 폭주는 수십 초 이상 지속되므로 2주기 연속을 요구하되, 급등이면
+        # 즉시 알린다 — 08-06 15:23 사건은 첫 주기에 이미 98.7%/2074MB였다.
+        # 임계의 80% 아래로 내려가야 재무장.
+        local pressure=false
+        if (( mem_pct >= MEM_PRESSURE_PCT )) \
+           && (( total_kbps >= IO_PRESSURE_KB || hidden_mb >= HIDDEN_ANON_WARN_MB )); then
+            pressure=true
+        fi
+        if $pressure; then
+            pressure_streak=$(( pressure_streak + 1 ))
+            local urgent=false
+            (( mem_pct >= MEM_PRESSURE_CRIT_PCT || hidden_mb >= HIDDEN_ANON_CRIT_MB )) && urgent=true
+            if { (( pressure_streak >= 2 )) || $urgent; } && [[ "$pressure_warned" == false ]]; then
+                log_entry "MEM_PRESSURE: mem ${mem_pct}% io ${total_kbps}KB/s hid ${hidden_txt} vmw60s ${vmw_burst} (${pressure_streak} cycles)"
+                if (( now_epoch - pressure_last_alert >= PRESSURE_ALERT_COOLDOWN )); then
+                    notify_memory_pressure "$mem_pct" "$mem_used" "$mem_total" \
+                                           "$total_kbps" "$hidden_mb" "$vmw_burst"
+                    pressure_last_alert=$now_epoch
+                fi
+                pressure_warned=true
+            fi
+        else
+            pressure_streak=0
+            if (( mem_pct < MEM_PRESSURE_PCT * 80 / 100 )); then
+                pressure_warned=false
+            fi
+        fi
 
         # 루트 ns 배관 init 보호 재적용. 배관 init은 세션 형태에 따라 늦게
         # 생성될 수 있어(이번 부팅엔 아직 없음) 1회성 보호로는 놓친다.

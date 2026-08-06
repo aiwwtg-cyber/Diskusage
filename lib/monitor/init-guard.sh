@@ -97,13 +97,24 @@ rootns_init_guard() {
 #   합계가 조기 중단 → 차액 수 GB가 "숨은 메모리"로 둔갑한다.
 #   cat은 사라진 파일을 건너뛰고 계속 가므로 cat 경유로 합산한다.
 # - 스윕을 먼저, meminfo를 나중에 읽는다. 그러면 스윕 중 종료된 프로세스는
-#   양쪽 모두에서 빠져 과대평가(가짜 경보) 대신 과소평가(음수→0 클램프)가 된다.
+#   양쪽 모두에서 빠져 과대평가(가짜 경보) 대신 과소평가(음수)가 된다.
+#
+# 음수는 측정 불가다 (2026-08-06). RssAnon은 fork CoW·공유 익명 페이지를 프로세스마다
+# 중복 계상하지만 AnonPages는 물리 페이지를 1회만 센다. 이중계상 총량이 실제 숨은
+# 메모리를 넘으면 차액이 음수가 된다(실측 -70MB). 이를 0으로 뭉개면 "숨은 메모리
+# 없음"과 구분되지 않아 게이지가 조용히 눈이 먼다 — 08-06 하루에만 1,286건이 그랬다.
+# 따라서 -1을 돌려 호출부가 명시적으로 무효 처리하게 한다.
+#
+# Pss_Anon(smaps_rollup)을 쓰면 이중계상이 사라지지만 PTRACE_MODE_READ 권한이 필요해
+# monitor 실행 사용자(aiwwt)로는 119개 중 49개를 못 읽는다(차액 2553MB로 과대평가). 배제.
+HIDDEN_ANON_INVALID=-1
+
 get_hidden_anon_mb() {
     local total seen diff
     seen=$(cat /proc/[0-9]*/status 2>/dev/null | awk '/^RssAnon:/{s+=$2} END{print s+0}')
     total=$(awk '/^AnonPages:/{print $2}' /proc/meminfo)
     diff=$(( (total - seen) / 1024 ))
-    (( diff < 0 )) && diff=0
+    (( diff < 0 )) && diff=$HIDDEN_ANON_INVALID
     echo "$diff"
 }
 
@@ -114,7 +125,8 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         rss)     echo "$(get_wsl_init_rss_mb)MB" ;;
         pids)    find_wsl_init_pids ;;
         check)   get_wsl_init_oom_adj ;;
-        hidden)  echo "$(get_hidden_anon_mb)MB" ;;
+        hidden)  h=$(get_hidden_anon_mb)
+                 (( h < 0 )) && echo "n/a (RssAnon 이중계상이 차액을 삼킴)" || echo "${h}MB" ;;
         rootns)  rootns_init_guard "${2:-scan}" ;;
         *)       echo "Usage: $0 {protect [attempts]|rss|pids|check|hidden|rootns [scan|protect]}" >&2; exit 1 ;;
     esac

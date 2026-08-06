@@ -42,31 +42,40 @@ notify_monitor_stopped() {
 $(date '+%Y-%m-%d %H:%M:%S')"
 }
 
-# WSL 배관 init(루트 ns, Ubuntu에선 안 보임)이 커지면 OOM killer가 이를 죽이고
-# 소켓 계층이 붕괴한다. 2026-07-22 사고에서는 80초 만에 3.8GB가 불어났다.
-# 관측은 숨은 익명 메모리(전역 AnonPages − Ubuntu 가시분)로 한다. 평시 ~26MB.
-notify_init_bloat() {
-    local hidden_mb="$1" threshold_mb="$2"
-    _send_telegram "⚠️ <b>WSL 배관 프로세스 메모리 폭주 감지</b>
+# 메모리 압박 알림 (2026-08-06 재설계).
+#
+# 이전에는 두 개의 알림이 따로 있었다:
+#   - notify_init_bloat        : HID 단독 임계 (3주기 요건에 걸려 실제 사건을 놓침)
+#   - notify_init_vm_pressure  : __vm_enough_memory 누적 증가 (8일 121건 발사, 실사건 0건)
+# 둘 다 폐기하고 실제 압박 지표로 통합했다. 근거는
+# docs/plans/2026-08-06-alert-precision-fix.md 참조.
+#
+# 커널 경고 개수는 판정에서 뺐지만 본문에는 남긴다 — 사후 분석에 유용하고,
+# 사용자가 "지금 무슨 일이 벌어지는가"를 한 화면에서 읽을 수 있다.
+notify_memory_pressure() {
+    local mem_pct="$1" mem_used="$2" mem_total="$3" io_kb="$4" hidden_mb="$5" vmw_burst="$6"
+    local io_mb=$(( io_kb / 1024 ))
+    # "평시 26MB"는 기준선으로 쓰지 않는다 — 그 값 자체가 RssAnon 이중계상 총량에
+    # 의존하는 우연한 수치임이 2026-08-06에 밝혀졌다. 임계 대비로만 표현한다.
+    local hid_line
+    if (( hidden_mb < 0 )); then
+        hid_line="숨은 메모리: 측정 불가 (이중계상)"
+    else
+        hid_line="숨은 메모리: <b>${hidden_mb}MB</b> (임계 ${HIDDEN_ANON_WARN_MB}MB)"
+    fi
+    # 직전에 '완료된' 60초 창의 값이다(최대 60초 지연). 판정에 안 쓰는 참고 정보라
+    # 슬라이딩 창까지는 구현하지 않았으므로 문구로 그 사실을 드러낸다.
+    local vmw_line=""
+    (( vmw_burst > 0 )) && vmw_line="
+커널 할당 실패: 직전 60초 창에서 ${vmw_burst}회"
+
+    _send_telegram "🚨 <b>WSL 메모리 압박</b>
 $(date '+%Y-%m-%d %H:%M:%S')
-루트 ns 추정 사용량 <b>${hidden_mb}MB</b> (임계 ${threshold_mb}MB, 평시 ~26MB)
+메모리: <b>${mem_pct}%</b> (${mem_used}M / ${mem_total}M)
+디스크 I/O: <b>${io_mb}MB/s</b>
+${hid_line}${vmw_line}
 
-과거 사고에서 이 수치가 5,600MB까지 오른 뒤
-WSL 전체가 붕괴했습니다. OOM 면제가 걸려 있으면
-WSL은 살아남지만 다른 프로세스가 대신 종료될 수 있습니다.
-호스트(Windows) 디스크·OneDrive 부하를 확인하세요."
-}
-
-# 커널의 __vm_enough_memory 경고 = OOM 붕괴의 선행 신호.
-# 과거 2건에서 OOM보다 각각 2분 31초, 43분 앞서 나타났다.
-notify_init_vm_pressure() {
-    local count="$1"
-    _send_telegram "🚨 <b>커널 메모리 할당 실패 감지</b>
-$(date '+%Y-%m-%d %H:%M:%S')
-__vm_enough_memory 경고 누적 ${count}회
-
-과거 사고에서 OOM 붕괴의 2분~43분 전에
-나타난 선행 신호입니다. 지금 조치하면 막을 수 있습니다:
-호스트 디스크 부하 중단(OneDrive 일시중지 등) 또는
-불필요한 프로세스 종료를 권합니다."
+과거 이 상태에서 WSL 배관 프로세스가 OOM으로 죽어
+소켓 계층 전체가 붕괴했습니다(2026-07-22, 2회).
+호스트(Windows) 디스크 부하를 줄이면 완화됩니다."
 }

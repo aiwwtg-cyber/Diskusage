@@ -28,6 +28,18 @@ load_config() {
     # 루트 ns init 보호 재적용 주기(초). wsl.exe 호출 비용 때문에 매 주기는 금지.
     ROOTNS_GUARD_INTERVAL=60
 
+    # ── 메모리 압박 알림 (2026-08-06) ──────────────────────────────────────
+    # 6일치 91,000 샘플 실측: 평시 최대 MEM 83.1%, 실제 압박 사건은 98.8%.
+    # 90%는 그 사이 어디에도 걸리지 않는 유일한 구간이라 오탐 0건이 나온다.
+    MEM_PRESSURE_PCT=90
+    # 급등 판정 — 이 값 이상이면 2주기를 기다리지 않고 즉시 알린다.
+    # 08-06 15:23 사건은 첫 주기에 이미 98.7%였다(9초 먼저 잡힌다).
+    MEM_PRESSURE_CRIT_PCT=95
+    HIDDEN_ANON_CRIT_MB=3000
+    # 압박 동반 조건. 100MB/s는 danger 임계(90MB/s)보다 위 — 실제 폭주만 잡는다.
+    IO_PRESSURE_KB=102400
+    PRESSURE_ALERT_COOLDOWN=1800
+
     local config_file="$DISKUSAGE_HOME/config/config.conf"
     if [[ -f "$config_file" ]]; then
         local -A _ALLOWED_KEYS=(
@@ -38,6 +50,8 @@ load_config() {
             [DANGER_DURATION]=1 [CRITICAL_DURATION]=1 [WSL_EXEC_TIMEOUT]=1
             [LOG_RETENTION_DAYS]=1 [MAX_LOG_SIZE_MB]=1
             [HIDDEN_ANON_WARN_MB]=1 [ROOTNS_GUARD_INTERVAL]=1
+            [MEM_PRESSURE_PCT]=1 [MEM_PRESSURE_CRIT_PCT]=1
+            [HIDDEN_ANON_CRIT_MB]=1 [IO_PRESSURE_KB]=1 [PRESSURE_ALERT_COOLDOWN]=1
         )
         while IFS='=' read -r key value; do
             [[ "$key" =~ ^#.*$ || -z "$key" ]] && continue

@@ -2,10 +2,12 @@
 
 ## Current Status
 
-**Phase:** WSL 커널 계층 방어 (루트 ns 배관 init OOM 차단 + 이중 감지망)
-**Last completed:** OOM 희생자가 **루트 네임스페이스의 배관 init**임을 규명, `wsl --system` 경유 보호 + 숨은 메모리(HID)·커널 경고 감시 가동 (2026-07-22 2차)
-**Next up:** ① 다음 `[EXTERNAL]` 폭풍에서 HID 곡선·ROOTNS_GUARD 동작 관측 ② 다음 부팅에서 serveronoff 문맥의 interop 동작 확인 ③ 배관 init 생성 조건 규명(HID 로그 축적 후)
+**Phase:** 알림 정밀도 확보 (스팸 제거 + 압박 기반 판정) → 다음은 루트 ns 접근 재조사
+**Last completed:** 커널경고 알림의 정밀도가 **0%**(8일 121건 감지 / 실사건 0건)임을 규명하고 압박 기반 판정으로 재설계 (2026-08-06)
+**Next up:** ① **`wsl --system`이 루트 ns가 아님이 확증됨 → `ROOTNS_GUARD`가 헛돌고 있다. 진짜 루트 ns 접근 가능성 재조사** ② HID 이중계상 해소 방안(현재 상시 `n/a`) ③ 다음 압박 사건에서 `notify_memory_pressure` 실수신 확인
 **Latest commit:** `6bc2a92 fix: reach root-namespace plumbing init via wsl --system, harden HID detection`
+
+> ⚠️ **2026-08-06 정정:** 아래 2026-07-22 2차 기록의 핵심 전제 — "`wsl.exe --system`이 루트 PID ns를 공유한다" — 는 **틀렸다.** ns inode 실측으로 확인: Ubuntu `pid:[4026532223]` vs system `pid:[4026532211]` — 서로 다르고 둘 다 루트가 아니다(루트라면 `pid2=kthreadd`여야 하나 실제로는 `systemd`). `dmesg`가 지목하는 배관 init(전역 pid 222)은 **양쪽 ns 어디에서도 보이지 않는다.** 따라서 `ROOTNS_GUARD`의 OOM 면제는 엉뚱한 프로세스(pid 22, rss 1.8MB)에 적용되고 있으며 **실효가 없다.**
 
 ---
 
@@ -37,12 +39,13 @@
 
 | 파일 | 역할 |
 |---|---|
-| `monitor.sh` | WSL 데몬. 5초 주기 `/proc/diskstats` 폴링 → `get_io_level` → normal 아니면 `set_status cleaning` + `run_cleanup` 호출 + `set_status monitoring`. warn 이상 또는 mem ≥ 85% 시 메모리 Top 5 프로세스도 로그에 기록. |
+| `monitor.sh` | WSL 데몬. 5초 주기 `/proc/diskstats` 폴링 → `get_io_level` → normal 아니면 `set_status cleaning` + `run_cleanup` 호출 + `set_status monitoring`. warn 이상 또는 mem ≥ 85% 시 메모리 Top 5 프로세스도 로그에 기록. **2026-08-06:** 커널경고(`__vm_enough_memory`)는 `log_entry` + 60초 창 밀도 집계 **전용으로 강등**(알림 없음). 알림은 통합 `MEM_PRESSURE` 판정 하나 — `mem ≥ 90% AND (io ≥ 100MB/s OR HID ≥ 1500MB)`, 2주기 연속, 급등(`mem ≥ 95%` 또는 `HID ≥ 3000MB`)이면 1주기 즉시, 30분 쿨다운. |
 | `lib/monitor/cleanup.sh` | `run_cleanup <level>` 함수. journalctl/tmp/fstrim 단계적 실행. |
 | `lib/monitor/config.sh` | `load_config` — 기본값 + `~/.diskusage/config/config.conf` 병합. |
-| `lib/monitor/diskstats.sh`, `logger.sh`, `telegram.sh` | I/O 계산 / 일별 로그 + 7일 로테이션 / curl 송신. |
-| `lib/monitor/init-guard.sh` | **WSL init OOM 면제 + 메모리 관측** (2026-07-22). Ubuntu ns: `find_wsl_init_pids` / `protect_wsl_init`(root 전용). **루트 ns**: `rootns_init_guard(mode)` — `wsl.exe --system -u root sh -s < rootns-scan.sh`로 전역 /proc 접근. `get_hidden_anon_mb` — 전역 AnonPages − Ubuntu RssAnon 합(배관 init 비대 게이지, 평시 ~26MB). CLI: `protect\|rss\|pids\|check\|hidden\|rootns`. |
-| `lib/monitor/rootns-scan.sh` | 루트 ns에서 stdin 주입 실행되는 POSIX sh 스크립트. comm=init 나열, protect 모드 시 **VmSize ≥ 4GB init에만** adj=-1000. |
+| `lib/monitor/diskstats.sh`, `logger.sh` | I/O 계산 / 일별 로그 + 7일 로테이션. |
+| `lib/monitor/telegram.sh` | curl 송신. `notify_monitor_started/stopped`, **`notify_memory_pressure`**(2026-08-06 신설 — 메모리%·I/O·HID·커널경고 burst를 한 화면에). 폐기: `notify_init_bloat`, `notify_init_vm_pressure`. |
+| `lib/monitor/init-guard.sh` | **WSL init OOM 면제 + 메모리 관측** (2026-07-22). Ubuntu ns: `find_wsl_init_pids` / `protect_wsl_init`(root 전용). `rootns_init_guard(mode)` — `wsl.exe --system -u root sh -s < rootns-scan.sh`. ⚠️ **이 경로는 루트 ns가 아니다**(2026-08-06 확증) — 배관 init에 도달 못 함. `get_hidden_anon_mb` — 전역 AnonPages − Ubuntu RssAnon 합. **2026-08-06:** 음수(= RssAnon 이중계상으로 측정 불가)를 0이 아닌 `-1`로 반환해 "숨은 메모리 없음"과 구분. CLI: `protect\|rss\|pids\|check\|hidden\|rootns`. |
+| `lib/monitor/rootns-scan.sh` | stdin 주입 실행되는 POSIX sh 스크립트. comm=init 나열, protect 모드 시 **VmSize ≥ 4GB init에만** adj=-1000. ⚠️ 실행되는 ns가 루트가 아니라 현재 pid 22(rss 1.8MB)만 잡힌다 — 의도한 12GB 배관 init이 아니다. |
 | `install-init-guard.sh` (루트) | systemd 유닛 생성 + wants 심볼릭 링크 직접 생성(D-Bus 사망 시에도 동작). 가시 init(plan9) 보호용. sudo 필요, 2026-07-22 설치 완료. |
 | `~/.diskusage/cleanup_trigger.sh` (setup.sh가 생성) | **Windows 워치독 ↔ WSL 정리 브리지.** `watchdog.ps1`이 `cleanup` (warn) 또는 `cleanup_and_notify` (alert) 액션 시 `Invoke-WslCommand`로 호출. config + cleanup.sh를 source 후 `run_cleanup $LEVEL` 실행. 단, `Get-WslMonitorStatus`가 `cleaning`이면 중복 방지로 스킵. |
 
@@ -81,6 +84,13 @@ WSL repo와 **별개 사본**. 실제 워치독·리스너가 이 경로에서 �
 ---
 
 ## Work Log
+
+### 2026-08-06 — 알림 정밀도 0% 규명 + 압박 기반 재설계
+
+- **What was done:** 사용자의 "알림이 스팸 같다"는 보고를 검증해 `KERNEL_VM_PRESSURE` 알림의 정밀도가 **0%**임을 규명하고, 판정을 실제 압박 지표로 재설계했다. 조사 중 `__vm_enough_memory`를 "OOM 선행 신호"로 본 원래 가설과 "`wsl --system`이 루트 ns"라는 전제가 **둘 다 데이터로 부정**됐다. 커널경고는 로그 전용으로 강등하고, `HIDDEN_BLOAT`와 통합해 `MEM_PRESSURE` 알림 하나로 정리했다. HID 음수(측정 불가)를 0이 아닌 `n/a`로 구분해 게이지가 눈이 먼 구간이 드러나게 했다.
+- **Artifacts:** `monitor.sh`(판정부 교체 + `pressure_*` 리네임), `lib/monitor/telegram.sh`(`notify_memory_pressure` 신설, `notify_init_bloat`·`notify_init_vm_pressure` 폐기), `lib/monitor/config.sh`(임계 5종 + allowlist), `lib/monitor/init-guard.sh`(`HIDDEN_ANON_INVALID=-1`), `docs/plans/2026-08-06-alert-precision-fix.md`
+- **Verification:** 문법 **4/4 PASS** · 6일치 **91,069 샘플** 리플레이(실제 `config.sh` 임계값 + `monitor.sh` 판정식 재현)에서 **오탐 0건**, 진짜 사건 **1건 포착**(`08-06 15:22:56` mem 98% / io 21731KB/s / hid 2074MB — 급등 예외로 목표보다 9초 조기) · 커널경고 알림 **121건 → 0건(−100%)** · 실기동 32분21초/**356 사이클** 관측에서 알림 **0건**, `HID:0MB` **0건**(전부 `n/a`) · 기존 bats **22/24**(실패 2건은 `HEAD`에서도 동일한 기존 결함)
+- **Known limitations:** 관측 구간에 커널 경고가 0건이라 **억제 검증은 리플레이에만 의존**한다 · 텔레그램 실수신은 다음 압박 사건에서 확인 필요 · HID 이중계상 자체는 미해결(상시 `n/a`이므로 판정이 실질적으로 `MEM ≥ 90% AND IO ≥ 100MB/s`로 동작) · 임계 90%의 근거는 6일 표본(평시 최대 83.1%, 사건 98.8%) · **`ROOTNS_GUARD`는 헛돌고 있으나 이번엔 문서 정정만 했다**
 
 ### 2026-07-22 (3차) — HID 측정 경합으로 인한 가짜 경보 수정
 
@@ -215,6 +225,10 @@ WSL repo와 **별개 사본**. 실제 워치독·리스너가 이 경로에서 �
 | `_TelegramLog`는 첫 시도 성공만 silent | 스킵(`[SKIP]`)·재시도 성공(`[OK] sent on retry #N`)·에러(`[ERROR]`)·최종실패(`[FAIL]`)는 모두 기록. 빈 telegram 로그 = "발송 시도 자체가 없음" 또는 "모든 발송이 첫 시도에 성공"을 의미. |
 | memento MCP 완전 제거 | 사용자가 안 씀 + 1.3GB 메모리 회수. |
 | **OneDrive 백업 현행 유지** (2026-07-22) | 매일 7.1GB(suho001) + 매주 68GB(VHDX) 업로드가 `[EXTERNAL]` 디스크 정체의 유력 원인이나, **사용자가 OneDrive 백업 자체를 업무상 필수로 판단**해 D:\ 이전안을 기각. 따라서 방아쇠는 상시 존재한다는 전제로 방어(루트 ns OOM 면제 + 이중 감지망)에 의존한다. |
+| **커널경고를 알림 트리거에서 제외** (2026-08-06) | `__vm_enough_memory`를 "OOM 선행 신호"로 본 가설이 데이터로 부정됨 — 6일간 119건 발생 시점의 메모리가 **최대 77.2%**로 시스템 압박과 무상관이고, 실제 압박 사건(08-06 15:23, mem 98.8%)엔 경고가 **없었다**. AND 조건에 두면 경고 없이 오는 진짜 위험을 필터로 걸러낸다. 신호는 버리지 않고 로그 + 알림 본문의 참고 정보로 남겼다. |
+| **알림 권고문에서 "OneDrive 일시중지" 삭제** (2026-08-06) | 7/22에 업무상 필수로 판단해 이미 기각한 조치를 반복 권고하고 있었다. 실행 불가능한 지시는 알림을 스팸으로 만든다. |
+| **HID 음수를 0이 아닌 `-1`로** (2026-08-06) | 0으로 뭉개면 "숨은 메모리 없음"과 "이중계상으로 측정 불가"가 구분되지 않아 게이지가 조용히 눈이 먼다 — 08-06 하루에 1,286건이 그랬다. `n/a`로 드러내면 사후에 눈먼 구간을 식별할 수 있다. |
+| **`Pss_Anon`(smaps_rollup) 방식 배제** (2026-08-06) | 이중계상을 원천 해결하지만 `PTRACE_MODE_READ` 권한이 필요해 monitor 실행 사용자(`aiwwt`)로는 119개 중 49개를 못 읽는다(차액 2553MB로 과대평가). root 실행은 침습적이라 채택하지 않음. |
 
 ---
 
@@ -231,6 +245,9 @@ WSL repo와 **별개 사본**. 실제 워치독·리스너가 이 경로에서 �
 
 ## 발견한 이상치 / 엣지 케이스
 
+- **`wsl --system`은 루트 PID ns가 아니다** (2026-08-06 확증). ns inode `4026532211`(system) ≠ `4026532223`(Ubuntu), 둘 다 루트 아님. system ns의 `pid1=init() pid2=systemd pid3=init-systemd(Ub…)` — 루트라면 pid2가 `kthreadd`여야 한다. system ns는 Ubuntu ns를 **포함**하는 상위 ns이지만(Ubuntu의 pid1 systemd가 여기선 pid2) 여전히 루트가 아니다. **`dmesg`의 pid 222는 어느 ns에서도 접근 불가.**
+- **`__vm_enough_memory` 경고는 메모리 압박과 무상관.** 6일 119건 전수에서 발생 시점 메모리 최대 **77.2%**. 경고 원문은 47회 전부 `pid: 222, comm: init`으로 동일 — 특정 프로세스가 큰 매핑을 시도하다 overcommit 회계에 걸리는 자체 동작이며, 커널이 할당을 **거부**한(= 방어가 작동한) 기록이다.
+- **`HID` 게이지가 조용히 눈이 멀 수 있다.** `RssAnon`은 fork CoW·공유 익명 페이지를 프로세스마다 중복 계상하지만 `AnonPages`는 물리 페이지를 1회만 센다. 이중계상 총량이 실제 숨은 메모리를 넘으면 차액이 음수가 된다(실측 −70MB). 08-06 13:46:55 큰 I/O 시작과 함께 음수 영역에 진입해 그날 1,286건이 `0MB`로 기록됐다. **평시 26MB라는 기준선 자체가 이중계상 총량에 의존한다.**
 - **04/27 기동된 워치독이 04/30까지 옛 코드로 살아있음.** Task Scheduler PT1M 반복은 기존 인스턴스가 살아있으면 새로 안 띄움 → 코드 갱신 시 자동 적용 안 됨.
 - **WSL 메모리가 비정상 속도로 빠져나감.** 5/2 10:51:13 MEM 3.3GB → 10:51:34 MEM 0.8GB (21초 -2.5GB). 5/3 새벽도 동일 패턴.
 - **WSL 죽음→회복→재죽음 사이클.** 5/3 05:06:30 백업 후 wsl restart 성공 → 05:07:08 즉시 메모리 다시 빠짐 → 05:08:28 재죽음 → 06:47까지 1.5시간 다운.
@@ -260,6 +277,12 @@ WSL repo와 **별개 사본**. 실제 워치독·리스너가 이 경로에서 �
 ## Confidence Markers (검증 수준)
 
 본 문서의 진술 중 추측이 섞이거나 데이터로 입증 안 된 항목 표시.
+
+### ⛔ 반증됨 (2026-08-06 실측으로 폐기)
+
+- **"`wsl.exe --system`이 루트 PID ns를 공유한다"** (2026-07-22 2차 기록) — **틀렸다.** ns inode 대조와 `pid2=systemd`(루트라면 `kthreadd`)로 반증. 당시 판정 근거였던 "커널 스레드 가시성"은 재현되지 않는다. → `ROOTNS_GUARD` 무효.
+- **"`__vm_enough_memory`는 OOM 붕괴의 선행 신호"** — 6일 119건 전수에서 발생 시점 메모리 최대 77.2%, 실제 압박 사건엔 경고 0건. 시스템 압박과 상관없이 특정 프로세스의 매핑 시도로 발생한다. → 알림 트리거에서 제외.
+- **"HID 평시 ~26MB"** — 이중계상 총량에 의존하는 우연한 값이다. 08-06 13:46 이후 상시 음수(측정 불가) 영역. 절대 기준선으로 쓸 수 없다.
 
 ### 🟡 일반 지식 + 정황 일치 (직접 입증 안 함)
 
@@ -309,6 +332,18 @@ WSL repo와 **별개 사본**. 실제 워치독·리스너가 이 경로에서 �
 추천 근거:
 - WSL 워킹셋 어제 평균 4.8~5.9GB → 8GB cap이면 여유 2GB.
 - Host에 8GB 확보 → 13.9GB 점유 → 약 11.9GB로 떨어짐 → 여유 4GB.
+
+### 🔴 `ROOTNS_GUARD`가 헛돌고 있음 (2026-08-06 발견, 미해결)
+
+`wsl --system`이 루트 ns가 아니므로 **2026-07-22에 구축한 배관 init OOM 면제는 실효가 없다.**
+현재 `rootns-scan.sh`가 잡는 것은 pid 22(rss 1.8MB)뿐이고, 정작 `dmesg`가 지목하는
+배관 init(전역 pid 222)에는 도달하지 못한다.
+
+다음 작업 단위에서 다룰 것:
+
+1. WSL2 구조상 루트 PID ns에 접근할 경로가 존재하는지 (Windows 호스트가 VM을 관리하므로 없을 가능성)
+2. 접근 불가로 확정되면 방어를 포기하고 **관측 + 조기 경보**로 전환 — 그 경우 `MEM_PRESSURE` 알림이 유일한 방어선이 되므로 HID 이중계상 해소가 더 중요해진다
+3. 또는 `.wslconfig`로 압박 자체를 줄이는 접근 (2026-07-22에 기각된 근거가 이번 발견으로 다시 흔들림)
 
 ### 미합의 사항
 
